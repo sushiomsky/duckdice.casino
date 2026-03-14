@@ -129,9 +129,15 @@ export function createApp(partialState?: Partial<ApiState>) {
   app.post("/bet", (req, res) => {
     const { serverSeed, clientSeed, nonce, amount, target } = req.body as BetRequest;
     try {
-      const preview = settleBet({ serverSeed, clientSeed, nonce, amount, target });
-      const risk = evaluateBet(state.risk, state.exposure, preview.payout);
-      if (!risk.accepted) return res.status(422).json({ error: risk.reason });
+      const preview = settleBet({ serverSeed, clientSeed, nonce, amount, target, houseEdgeBps });
+      const multiplier = getMultiplier(target, houseEdgeBps);
+      const risk = evaluateBet(state.risk, {
+        betAmount: amount,
+        multiplier,
+        currentExposure: state.exposure,
+      });
+
+      if (!risk.accepted) return res.status(422).json({ error: risk.reason, risk });
 
       state.exposure = risk.projectedExposure;
       const roll: RollRecord = {
