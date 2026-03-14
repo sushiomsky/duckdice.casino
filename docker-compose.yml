@@ -1,0 +1,56 @@
+version: "3.9"
+
+services:
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+  dice-engine:
+    build:
+      context: ./backend/dice-engine
+    environment:
+      - PORT=4001
+    ports:
+      - "4001:4001"
+
+  risk-engine:
+    build:
+      context: ./backend/risk-engine
+    environment:
+      - PORT=4002
+      - BANKROLL=25000
+      - MAX_PAYOUT_PERCENT=0.05
+      - MAX_EXPOSURE=5000
+    ports:
+      - "4002:4002"
+
+  api-gateway:
+    build:
+      context: ./backend/api-gateway
+    depends_on:
+      - dice-engine
+      - risk-engine
+      - rabbitmq
+    environment:
+      - PORT=4000
+      - DICE_ENGINE_URL=http://dice-engine:4001
+      - RISK_ENGINE_URL=http://risk-engine:4002
+      - RABBITMQ_URL=amqp://rabbitmq:5672
+      - EVENTS_EXCHANGE=duckdice.events
+    ports:
+      - "4000:4000"
+
+  websocket:
+    build:
+      context: ./backend/websocket
+    depends_on:
+      - rabbitmq
+    environment:
+      - PORT=4010
+      - RABBITMQ_URL=amqp://rabbitmq:5672
+      - EVENTS_EXCHANGE=duckdice.events
+      - WS_QUEUE_NAME=duckdice.websocket
+    ports:
+      - "4010:4010"
