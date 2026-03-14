@@ -1,0 +1,16 @@
+# DuckDice Backend Microservices
+
+## Services
+- **api-gateway**: Public REST API for bet creation and exposure lifecycle.
+- **dice-engine**: Deterministic roll + payout settlement service.
+- **risk-engine**: Real-time risk checks and exposure tracking.
+- **websocket**: Streams bet events to connected clients.
+
+## Communication Pattern
+1. `api-gateway` receives bet requests via REST (`POST /v1/bets`).
+2. `api-gateway` calls `dice-engine` via REST for settlement preview.
+3. `api-gateway` calls `risk-engine` via REST for acceptance and exposure commit.
+4. `api-gateway` publishes `bet.accepted`, `bet.rejected`, or `bet.error` to RabbitMQ topic exchange.
+5. `websocket` consumes `bet.*` events and broadcasts them to browser/mobile clients.
+
+This split allows horizontal scaling for latency-sensitive paths (`dice-engine`) and independent scaling for stateful workloads (`risk-engine`, websocket fan-out).
