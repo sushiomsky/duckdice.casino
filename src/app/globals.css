@@ -1,0 +1,227 @@
+:root {
+  --bg: #130025;
+  --panel: #1b0f3a;
+  --cyan: #17f1ff;
+  --text: #f8fbff;
+  --yellow: #ffdc58;
+  --gold: #f4c453;
+  --loss: #ff4d6d;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: Inter, system-ui, sans-serif;
+  background: radial-gradient(circle at 10% 10%, #25104a, var(--bg));
+  color: var(--text);
+}
+
+.dd-app {
+  min-height: 100vh;
+  padding: 0.75rem;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.dd-header,
+.dd-footer,
+.dd-panel,
+.dd-dice-stage,
+.dd-bottom-panel {
+  background: color-mix(in hsl, var(--panel), black 12%);
+  border: 1px solid rgba(23, 241, 255, 0.3);
+  border-radius: 14px;
+  padding: 0.85rem;
+}
+
+.dd-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+.dd-logo {
+  font-weight: 800;
+  color: var(--cyan);
+}
+
+.dd-header-stats {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+}
+
+.dd-main-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.75rem;
+}
+
+label,
+input,
+button {
+  font: inherit;
+}
+
+label {
+  display: grid;
+  gap: 0.4rem;
+  margin-bottom: 0.65rem;
+}
+
+input[type='number'] {
+  background: #0f0a21;
+  color: var(--text);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  padding: 0.5rem 0.65rem;
+}
+
+.dd-btn,
+.dd-roll-btn,
+.dd-ghost-btn {
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 10px;
+  background: #24134a;
+  color: var(--text);
+  padding: 0.45rem 0.8rem;
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.12s ease, background 0.2s;
+}
+
+.dd-btn:hover,
+.dd-roll-btn:hover,
+.dd-ghost-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 0 0 2px rgba(23, 241, 255, 0.2);
+}
+
+.dd-btn.active {
+  background: linear-gradient(90deg, #2149b8, #18d2e8);
+}
+
+.dd-toggle-row,
+.dd-quick-bets {
+  display: flex;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.7rem;
+}
+
+.dd-roll-btn {
+  width: 100%;
+  font-weight: 700;
+  background: linear-gradient(120deg, #2b27cf, #16d9e7);
+}
+
+.dd-roll-btn:active {
+  transform: scale(0.985);
+}
+
+.dd-dice-stage {
+  text-align: center;
+}
+
+.dd-dice {
+  width: min(220px, 64vw);
+  aspect-ratio: 1;
+  margin: 0.3rem auto 1rem;
+  border-radius: 22px;
+  display: grid;
+  place-content: center;
+  font-size: clamp(1.5rem, 6vw, 2.6rem);
+  font-weight: 800;
+  background: linear-gradient(155deg, #2e2da8, #18b2bd);
+}
+
+.dd-dice.rolling {
+  animation: shake 0.45s linear infinite;
+}
+
+.dd-dice.win {
+  background: radial-gradient(circle, #f6dc8c, var(--gold));
+  color: #2d1f00;
+  box-shadow: 0 0 24px rgba(244, 196, 83, 0.7);
+}
+
+.dd-dice.loss {
+  background: linear-gradient(160deg, #7d2742, #351925);
+  animation: fadeLoss 0.6s ease;
+}
+
+.dd-fair-box {
+  text-align: left;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 12px;
+  padding: 0.6rem;
+  overflow-wrap: anywhere;
+}
+
+.dd-history-list {
+  max-height: 230px;
+  overflow: auto;
+  padding-left: 1.2rem;
+}
+
+.profit {
+  color: var(--yellow);
+}
+
+.loss {
+  color: var(--loss);
+}
+
+.dd-bottom-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.8rem;
+}
+
+.dd-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.dd-footer nav {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.dd-footer a {
+  color: var(--cyan);
+}
+
+@media (min-width: 900px) {
+  .dd-app {
+    padding: 1.2rem;
+  }
+
+  .dd-main-grid {
+    grid-template-columns: 1.2fr 1fr;
+  }
+
+  .dd-bottom-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+@keyframes shake {
+  0% { transform: rotate(0deg); }
+  25% { transform: rotate(3deg) scale(1.02); }
+  50% { transform: rotate(0deg) scale(0.98); }
+  75% { transform: rotate(-3deg) scale(1.02); }
+  100% { transform: rotate(0deg); }
+}
+
+@keyframes fadeLoss {
+  from { opacity: 0.6; }
+  to { opacity: 1; }
+}
