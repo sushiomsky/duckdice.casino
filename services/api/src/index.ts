@@ -7,6 +7,10 @@ export interface ApiState {
   risk: RiskConfig;
 }
 
+function getMultiplier(target: number, houseEdgeBps = 100): number {
+  return (100 - houseEdgeBps / 100) / target;
+}
+
 export function createApp(state: ApiState) {
   const app = express();
   app.use(express.json());
@@ -16,14 +20,20 @@ export function createApp(state: ApiState) {
   });
 
   app.post("/v1/bets", (req, res) => {
-    const { serverSeed, clientSeed, nonce, amount, target } = req.body;
+    const { serverSeed, clientSeed, nonce, amount, target, houseEdgeBps } = req.body;
     try {
-      const preview = settleBet({ serverSeed, clientSeed, nonce, amount, target });
-      const risk = evaluateBet(state.risk, state.exposure, preview.payout);
-      if (!risk.accepted) return res.status(422).json({ error: risk.reason });
+      const preview = settleBet({ serverSeed, clientSeed, nonce, amount, target, houseEdgeBps });
+      const multiplier = getMultiplier(target, houseEdgeBps);
+      const risk = evaluateBet(state.risk, {
+        betAmount: amount,
+        multiplier,
+        currentExposure: state.exposure,
+      });
+
+      if (!risk.accepted) return res.status(422).json({ error: risk.reason, risk });
 
       state.exposure = risk.projectedExposure;
-      return res.status(201).json(preview);
+      return res.status(201).json({ ...preview, risk });
     } catch (error) {
       return res.status(400).json({ error: (error as Error).message });
     }
@@ -36,7 +46,7 @@ if (process.env.NODE_ENV !== "test") {
   const port = Number(process.env.PORT ?? 3000);
   const app = createApp({
     exposure: 0,
-    risk: { bankroll: 10_000, maxExposure: 3_000, maxPayoutPercent: 0.05 },
+    risk: { bankroll: 10_000, maxExposure: 3_000, riskFactor: 0.005 },
   });
 
   app.listen(port, () => {

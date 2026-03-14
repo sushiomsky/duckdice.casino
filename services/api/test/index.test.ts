@@ -5,7 +5,7 @@ import { createApp } from "../src/index.js";
 describe("api", () => {
   const app = createApp({
     exposure: 0,
-    risk: { bankroll: 1000, maxExposure: 100, maxPayoutPercent: 0.2 },
+    risk: { bankroll: 1000, maxExposure: 100, riskFactor: 0.02 },
   });
 
   it("returns health", async () => {
@@ -26,5 +26,19 @@ describe("api", () => {
     expect(res.status).toBe(201);
     expect(res.body).toHaveProperty("roll");
     expect(res.body).toHaveProperty("proof");
+    expect(res.body).toHaveProperty("risk");
+  });
+
+  it("rejects bets over the dynamic max bet", async () => {
+    const res = await request(app).post("/v1/bets").send({
+      serverSeed: "server",
+      clientSeed: "client",
+      nonce: 2,
+      amount: 100,
+      target: 60,
+    });
+
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe("max_bet_exceeded");
   });
 });
