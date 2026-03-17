@@ -212,11 +212,12 @@ function hashInternalPayload(payload) {
   return crypto.createHash("sha256").update(JSON.stringify(payload ?? {})).digest("hex");
 }
 
-function signInternalRequest({ method, path, timestamp, payload }) {
+function signInternalRequest({ method, path, timestamp, requestId, payload }) {
   const canonical = [
     method.toUpperCase(),
     path,
     timestamp,
+    requestId,
     hashInternalPayload(payload)
   ].join("\n");
   return crypto.createHmac("sha256", config.internalRequestSigningKey).update(canonical).digest("hex");
@@ -234,15 +235,18 @@ async function recordAdminAction(action, actorApiKey, details) {
 
 function internalRequestConfig({ method, path, payload }) {
   const timestamp = Date.now().toString();
+  const requestId = uuidv4();
   return {
     timeout: 2000,
     headers: {
       "x-internal-token": config.internalApiToken,
       "x-internal-timestamp": timestamp,
+      "x-internal-request-id": requestId,
       "x-internal-signature": signInternalRequest({
         method,
         path,
         timestamp,
+        requestId,
         payload
       })
     }

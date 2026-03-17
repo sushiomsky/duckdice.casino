@@ -1,6 +1,7 @@
 const crypto = require("node:crypto");
 const express = require("express");
 const fs = require("node:fs");
+const { createClient } = require("redis");
 
 const app = express();
 app.use(express.json());
@@ -19,18 +20,23 @@ const internalRequestSigningKey = getSecret("INTERNAL_REQUEST_SIGNING_KEY", inte
 const config = {
   internalApiToken,
   internalRequestSigningKey,
-  internalAuthMaxSkewMs: Number(process.env.INTERNAL_AUTH_MAX_SKEW_MS || 30_000)
+  internalAuthMaxSkewMs: Number(process.env.INTERNAL_AUTH_MAX_SKEW_MS || 30_000),
+  internalReplayTtlMs: Number(process.env.INTERNAL_REPLAY_TTL_MS || 45_000),
+  redisUrl: process.env.REDIS_URL || "redis://redis:6379"
 };
+
+let redisClient;
 
 function hashInternalPayload(payload) {
   return crypto.createHash("sha256").update(JSON.stringify(payload ?? {})).digest("hex");
 }
 
-function signInternalRequest({ method, path, timestamp, payload }) {
+function signInternalRequest({ method, path, timestamp, requestId, payload }) {
   const canonical = [
     method.toUpperCase(),
     path,
     timestamp,
+    requestId,
     hashInternalPayload(payload)
   ].join("\n");
   return crypto.createHmac("sha256", config.internalRequestSigningKey).update(canonical).digest("hex");
@@ -43,33 +49,73 @@ function signaturesMatch(received, expected) {
   return crypto.timingSafeEqual(Buffer.from(received), Buffer.from(expected));
 }
 
-function internalAuth(req, res, next) {
-  const token = req.header("x-internal-token");
-  const timestamp = req.header("x-internal-timestamp");
-  const signature = req.header("x-internal-signature");
-  if (!token || token !== config.internalApiToken || !timestamp || !signature) {
-    return res.status(401).json({ error: "unauthorized" });
-  }
+function isUuid(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
 
-  const timestampMs = Number(timestamp);
-  if (!Number.isInteger(timestampMs)) {
-    return res.status(401).json({ error: "unauthorized" });
+async function connectRedisWithRetry() {
+  while (!redisClient) {
+    try {
+      const client = createClient({ url: config.redisUrl });
+      client.on("error", (error) => {
+        console.error("dice-engine redis client error", error.message);
+      });
+      await client.connect();
+      await client.ping();
+      redisClient = client;
+      console.log("dice-engine connected to Redis");
+    } catch (error) {
+      console.error("dice-engine redis connection failed; retrying in 2s", error.message);
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
   }
-  if (Math.abs(Date.now() - timestampMs) > config.internalAuthMaxSkewMs) {
-    return res.status(401).json({ error: "unauthorized" });
-  }
+}
 
-  const expectedSignature = signInternalRequest({
-    method: req.method,
-    path: req.originalUrl.split("?")[0],
-    timestamp,
-    payload: req.body
-  });
-  if (!signaturesMatch(signature, expectedSignature)) {
-    return res.status(401).json({ error: "unauthorized" });
-  }
+async function consumeInternalRequest(requestId) {
+  const key = `internal:req:dice:${requestId}`;
+  const result = await redisClient.set(key, "1", { NX: true, PX: config.internalReplayTtlMs });
+  return result === "OK";
+}
 
-  return next();
+async function internalAuth(req, res, next) {
+  try {
+    const token = req.header("x-internal-token");
+    const timestamp = req.header("x-internal-timestamp");
+    const requestId = req.header("x-internal-request-id");
+    const signature = req.header("x-internal-signature");
+    if (!token || token !== config.internalApiToken || !timestamp || !requestId || !signature || !isUuid(requestId)) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+
+    const timestampMs = Number(timestamp);
+    if (!Number.isInteger(timestampMs)) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+    if (Math.abs(Date.now() - timestampMs) > config.internalAuthMaxSkewMs) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+
+    const expectedSignature = signInternalRequest({
+      method: req.method,
+      path: req.originalUrl.split("?")[0],
+      timestamp,
+      requestId,
+      payload: req.body
+    });
+    if (!signaturesMatch(signature, expectedSignature)) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+
+    const accepted = await consumeInternalRequest(requestId);
+    if (!accepted) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+
+    return next();
+  } catch (error) {
+    console.error("dice-engine internal auth unavailable", error.message);
+    return res.status(503).json({ error: "internal_auth_unavailable" });
+  }
 }
 
 function rollDice({ serverSeed, clientSeed, nonce }) {
@@ -106,7 +152,15 @@ app.post("/v1/settle", (req, res) => {
   }
 });
 
-const port = Number(process.env.PORT || 4001);
-app.listen(port, () => {
-  console.log(`dice-engine listening on ${port}`);
+async function bootstrap() {
+  await connectRedisWithRetry();
+  const port = Number(process.env.PORT || 4001);
+  app.listen(port, () => {
+    console.log(`dice-engine listening on ${port}`);
+  });
+}
+
+bootstrap().catch((error) => {
+  console.error("dice-engine bootstrap failed", error);
+  process.exit(1);
 });
