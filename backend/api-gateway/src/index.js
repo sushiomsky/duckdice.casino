@@ -324,6 +324,18 @@ function isUuid(value) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
 
+app.get("/", (_req, res) => {
+  res.status(200).json({
+    status: "ok",
+    service: "duckdice-api-gateway",
+    message: "DuckDice backend is running.",
+    endpoints: {
+      health: "/health",
+      bets: "/v1/bets"
+    }
+  });
+});
+
 app.get("/health", (_req, res) => {
   res.json({
     status: "ok",
