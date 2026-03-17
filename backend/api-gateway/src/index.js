@@ -35,7 +35,8 @@ const config = {
   eventsExchange: process.env.EVENTS_EXCHANGE || "duckdice.events",
   postgresUrl: process.env.POSTGRES_URL || "postgres://duckdice:duckdice@postgres:5432/duckdice",
   redisUrl: process.env.REDIS_URL || "redis://redis:6379",
-  cacheTtlSec: Number(process.env.BET_CACHE_TTL_SEC || 300)
+  cacheTtlSec: Number(process.env.BET_CACHE_TTL_SEC || 300),
+  metricsRetentionMinutes: Number(process.env.METRICS_RETENTION_MINUTES || 2880)
 };
 
 const authState = {
@@ -43,6 +44,7 @@ const authState = {
   adminApiKey: config.adminApiKey
 };
 const AUTH_STATE_KEY = "auth:keys";
+const METRIC_PREFIX = "metrics";
 
 let rabbitChannel;
 let pgPool;
@@ -153,6 +155,35 @@ function adminRowToAction(row) {
   };
 }
 
+function minuteBucket(timestampMs) {
+  return Math.floor(timestampMs / 60_000);
+}
+
+function metricKey(name, bucket) {
+  return `${METRIC_PREFIX}:${name}:${bucket}`;
+}
+
+async function incrementMetric(name, timestampMs = Date.now()) {
+  const bucket = minuteBucket(timestampMs);
+  const key = metricKey(name, bucket);
+  const count = await redisClient.incr(key);
+  if (count === 1) {
+    await redisClient.expire(key, config.metricsRetentionMinutes * 60);
+  }
+}
+
+async function sumMetric(name, lookbackMinutes, timestampMs = Date.now()) {
+  const bounded = Math.max(1, Math.min(lookbackMinutes, config.metricsRetentionMinutes));
+  const latestBucket = minuteBucket(timestampMs);
+  const keys = [];
+  for (let i = 0; i < bounded; i += 1) {
+    keys.push(metricKey(name, latestBucket - i));
+  }
+
+  const values = await redisClient.mGet(keys);
+  return values.reduce((sum, value) => sum + Number.parseInt(value || "0", 10), 0);
+}
+
 async function persistBet(record) {
   await pgPool.query(
     `
@@ -234,6 +265,11 @@ async function recordAdminAction(action, actorApiKey, details) {
     `,
     [uuidv4(), new Date().toISOString(), hashApiKey(actorApiKey), action, JSON.stringify(details)]
   );
+  try {
+    await incrementMetric(`admin_action:${action}`);
+  } catch (error) {
+    console.error("admin action metric increment failed", error.message);
+  }
 }
 
 function internalRequestConfig({ method, path, payload }) {
@@ -291,6 +327,11 @@ function rateLimitMiddleware(windowMs, maxRequests) {
 
       const ttlMs = await redisClient.pTTL(key);
       if (count > maxRequests) {
+        try {
+          await incrementMetric("rate_limit_exceeded");
+        } catch (metricError) {
+          console.error("rate limit metric increment failed", metricError.message);
+        }
         return res.status(429).json({
           error: "rate_limit_exceeded",
           retryAfterMs: ttlMs > 0 ? ttlMs : windowMs
@@ -534,6 +575,73 @@ app.get("/v1/admin/actions", requireApiKey("admin"), async (req, res) => {
     return res.status(200).json({ actions: query.rows.map(adminRowToAction) });
   } catch (error) {
     return res.status(500).json({ error: "admin_actions_failed", detail: toDetail(error) });
+  }
+});
+
+app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
+  const rawLookbackMinutes = req.query.lookbackMinutes;
+  const lookbackMinutes = rawLookbackMinutes === undefined ? 60 : Number(rawLookbackMinutes);
+  if (!Number.isInteger(lookbackMinutes) || lookbackMinutes <= 0 || lookbackMinutes > config.metricsRetentionMinutes) {
+    return res.status(400).json({ error: "invalid_lookback_minutes" });
+  }
+
+  const since = new Date(Date.now() - lookbackMinutes * 60_000).toISOString();
+  try {
+    const [
+      rateLimitExceeded,
+      adminTotalQuery,
+      adminByActionQuery,
+      betByStatusQuery
+    ] = await Promise.all([
+      sumMetric("rate_limit_exceeded", lookbackMinutes),
+      pgPool.query("SELECT COUNT(*)::int AS count FROM admin_actions WHERE created_at >= $1", [since]),
+      pgPool.query(
+        `
+          SELECT action, COUNT(*)::int AS count
+          FROM admin_actions
+          WHERE created_at >= $1
+          GROUP BY action
+          ORDER BY action
+        `,
+        [since]
+      ),
+      pgPool.query(
+        `
+          SELECT status, COUNT(*)::int AS count
+          FROM bets
+          WHERE created_at >= $1
+          GROUP BY status
+          ORDER BY status
+        `,
+        [since]
+      )
+    ]);
+
+    const adminByAction = Object.fromEntries(
+      adminByActionQuery.rows.map((row) => [row.action, row.count])
+    );
+    const betByStatus = Object.fromEntries(
+      betByStatusQuery.rows.map((row) => [row.status, row.count])
+    );
+
+    return res.status(200).json({
+      generatedAt: new Date().toISOString(),
+      lookbackMinutes,
+      rateLimit: {
+        windowMs: config.rateLimitWindowMs,
+        maxRequests: config.rateLimitMaxRequests,
+        exceeded: rateLimitExceeded
+      },
+      adminActions: {
+        total: adminTotalQuery.rows[0]?.count || 0,
+        byAction: adminByAction
+      },
+      bets: {
+        byStatus: betByStatus
+      }
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "admin_stats_failed", detail: toDetail(error) });
   }
 });
 

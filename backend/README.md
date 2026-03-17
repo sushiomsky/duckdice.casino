@@ -26,6 +26,7 @@ This split allows horizontal scaling for latency-sensitive paths (`dice-engine`)
 - `api-gateway` stores admin operation audit records in PostgreSQL (`admin_actions`) with hashed key fingerprints.
 - `api-gateway` persists rotated key state in Redis (`auth:keys`) to survive service restarts.
 - Health endpoints expose non-secret readiness diagnostics for infra connectivity and internal-auth hardening (signature enforcement, replay window, Redis readiness).
+- `api-gateway` exposes `GET /v1/admin/stats` for dashboard-ready operational telemetry (rate-limit saturation and admin/bet activity over lookback windows).
 - Additional REST support:
   - `GET /v1/bets/:betId` resolves from Redis first, then PostgreSQL.
   - `GET /v1/bets?limit=20` returns recent persisted bets.
