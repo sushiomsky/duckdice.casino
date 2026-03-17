@@ -1,6 +1,10 @@
 export interface RiskConfig {
   bankroll: number;
   /**
+   * When true, all new bets are rejected by risk policy.
+   */
+  emergencyStop?: boolean;
+  /**
    * Fraction of bankroll that can be risked per bet before multiplier scaling.
    * Defaults to 0.5%.
    */
@@ -23,7 +27,7 @@ export interface BetRiskInput {
 
 export interface RiskDecision {
   accepted: boolean;
-  reason?: "invalid_bankroll" | "invalid_bet" | "invalid_multiplier" | "max_bet_exceeded" | "max_payout_exceeded" | "max_exposure_exceeded";
+  reason?: "emergency_stop" | "invalid_bankroll" | "invalid_bet" | "invalid_multiplier" | "max_bet_exceeded" | "max_payout_exceeded" | "max_exposure_exceeded";
   riskFactor: number;
   maxBet: number;
   maxPayout: number;
@@ -55,6 +59,7 @@ export function evaluateBet(config: RiskConfig, input: BetRiskInput): RiskDecisi
     projectedExposure: input.currentExposure,
   });
 
+  if (config.emergencyStop) return fail("emergency_stop");
   if (config.bankroll <= 0) return fail("invalid_bankroll");
   if (input.betAmount <= 0) return fail("invalid_bet");
   if (input.multiplier <= 0) return fail("invalid_multiplier");

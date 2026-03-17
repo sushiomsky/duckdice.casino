@@ -117,4 +117,35 @@ describe("api", () => {
     expect(duplicate.status).toBe(400);
     expect(duplicate.body.error).toContain("nonce must strictly increase");
   });
+
+  it("toggles emergency stop and blocks new bets", async () => {
+    const stoppedApp = createApp({
+      exposure: 0,
+      apiKey,
+      rolls: [],
+      risk: { bankroll: 1000, riskFactor: 0.05, maxExposure: 100, maxPayout: 200, emergencyStop: false },
+      rateLimit: { windowMs: 60_000, maxRequests: 20 },
+    });
+
+    const enable = await request(stoppedApp)
+      .post("/v1/admin/emergency-stop")
+      .set("x-api-key", apiKey)
+      .send({ enabled: true });
+    expect(enable.status).toBe(200);
+    expect(enable.body.emergencyStop).toBe(true);
+
+    const blockedBet = await request(stoppedApp).post("/v1/bets").set("x-api-key", apiKey).send({
+      serverSeed: "stop-server",
+      clientSeed: "stop-client",
+      nonce: 1,
+      amount: 5,
+      target: 60,
+    });
+    expect(blockedBet.status).toBe(422);
+    expect(blockedBet.body.error).toBe("emergency_stop");
+
+    const bankroll = await request(stoppedApp).get("/v1/bankroll").set("x-api-key", apiKey);
+    expect(bankroll.status).toBe(200);
+    expect(bankroll.body.emergencyStop).toBe(true);
+  });
 });

@@ -17,6 +17,15 @@ describe("risk-engine", () => {
     expect(out.maxPayout).toBe(5);
   });
 
+  it("rejects bets when emergency stop is enabled", () => {
+    const out = evaluateBet(
+      { bankroll: 1000, emergencyStop: true, maxExposure: 200 },
+      { currentExposure: 0, betAmount: 2, multiplier: 2 },
+    );
+    expect(out.accepted).toBe(false);
+    expect(out.reason).toBe("emergency_stop");
+  });
+
   it("rejects when dynamic max bet is exceeded", () => {
     const out = evaluateBet(cfg, { currentExposure: 0, betAmount: 3, multiplier: 2 });
     expect(out.accepted).toBe(false);

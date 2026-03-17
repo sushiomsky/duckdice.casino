@@ -50,7 +50,7 @@ interface ApiStats {
 function createDefaultState(): ApiState {
   return {
     exposure: 0,
-    risk: { bankroll: 10_000, riskFactor: 0.05, maxExposure: 3_000, maxPayout: 500 },
+    risk: { bankroll: 10_000, riskFactor: 0.05, maxExposure: 3_000, maxPayout: 500, emergencyStop: false },
     apiKey: process.env.API_KEY ?? "duckdice-dev-key",
     rateLimit: {
       windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS ?? 60_000),
@@ -127,10 +127,27 @@ export function createApp(partialState?: Partial<ApiState>) {
   app.use(rateLimitMiddleware(state.rateLimit.windowMs, state.rateLimit.maxRequests));
 
   app.get("/health", (_req, res) => {
-    res.json({ status: "ok", exposure: state.exposure });
+    res.json({ status: "ok", exposure: state.exposure, emergencyStop: state.risk.emergencyStop ?? false });
   });
 
   app.use(apiKeyAuth(state.apiKey));
+
+  const emergencyStopHandler = (req: Request, res: Response) => {
+    const { enabled } = req.body as { enabled?: unknown };
+    if (typeof enabled !== "boolean") {
+      return res.status(400).json({ error: "enabled must be boolean" });
+    }
+
+    state.risk = {
+      ...state.risk,
+      emergencyStop: enabled,
+    };
+
+    return res.json({ emergencyStop: state.risk.emergencyStop });
+  };
+
+  app.post("/admin/emergency-stop", emergencyStopHandler);
+  app.post("/v1/admin/emergency-stop", emergencyStopHandler);
 
   const createBetHandler = (req: Request, res: Response) => {
     const { serverSeed, clientSeed, nonce, amount, chance: rawChance, target, rollOver, houseEdgeBps } = req.body as BetRequest;
@@ -198,6 +215,7 @@ export function createApp(partialState?: Partial<ApiState>) {
       available,
       maxExposure: state.risk.maxExposure,
       maxPayout: Number(maxPayout.toFixed(8)),
+      emergencyStop: state.risk.emergencyStop ?? false,
     });
   };
 
