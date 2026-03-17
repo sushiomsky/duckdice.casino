@@ -1,0 +1,4 @@
+duckdice.casino {
+  encode gzip
+  reverse_proxy api-gateway:4000
+}

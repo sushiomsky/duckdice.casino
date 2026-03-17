@@ -1,4 +1,16 @@
 services:
+  caddy:
+    image: caddy:2-alpine
+    depends_on:
+      - api-gateway
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./infra/docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
   postgres:
     image: postgres:16-alpine
     environment:
@@ -82,3 +94,5 @@ services:
 
 volumes:
   postgres_data:
+  caddy_data:
+  caddy_config:
