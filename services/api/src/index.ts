@@ -131,7 +131,7 @@ export function createApp(partialState?: Partial<ApiState>) {
 
   app.use(apiKeyAuth(state.apiKey));
 
-  app.post("/bet", (req, res) => {
+  const createBetHandler = (req: Request, res: Response) => {
     const { serverSeed, clientSeed, nonce, amount, chance: rawChance, target, rollOver, houseEdgeBps } = req.body as BetRequest;
     try {
       const chance = rawChance ?? target;
@@ -174,13 +174,19 @@ export function createApp(partialState?: Partial<ApiState>) {
     } catch (error) {
       return res.status(400).json({ error: (error as Error).message });
     }
-  });
+  };
 
-  app.get("/rolls", (_req, res) => {
+  app.post("/bet", createBetHandler);
+  app.post("/v1/bets", createBetHandler);
+
+  const rollsHandler = (_req: Request, res: Response) => {
     return res.json({ rolls: state.rolls });
-  });
+  };
 
-  app.get("/bankroll", (_req, res) => {
+  app.get("/rolls", rollsHandler);
+  app.get("/v1/rolls", rollsHandler);
+
+  const bankrollHandler = (_req: Request, res: Response) => {
     const available = Number((state.risk.bankroll - state.exposure).toFixed(8));
     const riskFactor = state.risk.riskFactor ?? 0.005;
     const maxPayout = state.risk.maxPayout ?? state.risk.bankroll * riskFactor;
@@ -191,7 +197,10 @@ export function createApp(partialState?: Partial<ApiState>) {
       maxExposure: state.risk.maxExposure,
       maxPayout: Number(maxPayout.toFixed(8)),
     });
-  });
+  };
+
+  app.get("/bankroll", bankrollHandler);
+  app.get("/v1/bankroll", bankrollHandler);
 
   app.get("/stats", (_req, res) => {
     return res.json({ stats: calculateStats(state.rolls) });

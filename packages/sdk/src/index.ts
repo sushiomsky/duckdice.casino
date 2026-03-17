@@ -3,11 +3,21 @@ export interface BetRequest {
   clientSeed: string;
   nonce: number;
   amount: number;
-  target: number;
+  target?: number;
+  chance?: number;
+  rollOver?: boolean;
+  houseEdgeBps?: number;
+}
+
+export interface DuckDiceClientOptions {
+  apiKey?: string;
 }
 
 export class DuckDiceClient {
-  constructor(private readonly baseUrl: string) {}
+  constructor(
+    private readonly baseUrl: string,
+    private readonly options: DuckDiceClientOptions = {},
+  ) {}
 
   async health() {
     const res = await fetch(`${this.baseUrl}/health`);
@@ -16,9 +26,14 @@ export class DuckDiceClient {
   }
 
   async createBet(request: BetRequest) {
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (this.options.apiKey) {
+      headers["x-api-key"] = this.options.apiKey;
+    }
+
     const res = await fetch(`${this.baseUrl}/v1/bets`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers,
       body: JSON.stringify(request),
     });
 

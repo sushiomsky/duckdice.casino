@@ -10,4 +10,37 @@ describe("sdk", () => {
     const out = await client.health();
     expect(out.status).toBe("ok");
   });
+
+  it("calls v1 bets endpoint with optional api key", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ bet: { won: true } }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const client = new DuckDiceClient("http://api", { apiKey: "test-key" });
+    const payload = await client.createBet({
+      serverSeed: "server",
+      clientSeed: "client",
+      nonce: 1,
+      amount: 2,
+      target: 60,
+    });
+
+    expect(payload.bet.won).toBe(true);
+    expect(mockFetch).toHaveBeenCalledWith("http://api/v1/bets", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": "test-key",
+      },
+      body: JSON.stringify({
+        serverSeed: "server",
+        clientSeed: "client",
+        nonce: 1,
+        amount: 2,
+        target: 60,
+      }),
+    });
+  });
 });

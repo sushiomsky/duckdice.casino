@@ -24,8 +24,8 @@ describe("api", () => {
     expect(res.body.error).toBe("unauthorized");
   });
 
-  it("creates a bet and returns json payload", async () => {
-    const res = await request(app).post("/bet").set("x-api-key", apiKey).send({
+  it("creates a bet via v1 endpoint and returns json payload", async () => {
+    const res = await request(app).post("/v1/bets").set("x-api-key", apiKey).send({
       serverSeed: "server",
       clientSeed: "client",
       nonce: 1,
@@ -40,11 +40,11 @@ describe("api", () => {
   });
 
   it("returns rolls, bankroll and stats", async () => {
-    const rolls = await request(app).get("/rolls").set("x-api-key", apiKey);
+    const rolls = await request(app).get("/v1/rolls").set("x-api-key", apiKey);
     expect(rolls.status).toBe(200);
     expect(Array.isArray(rolls.body.rolls)).toBe(true);
 
-    const bankroll = await request(app).get("/bankroll").set("x-api-key", apiKey);
+    const bankroll = await request(app).get("/v1/bankroll").set("x-api-key", apiKey);
     expect(bankroll.status).toBe(200);
     expect(bankroll.body).toHaveProperty("bankroll");
     expect(bankroll.body).toHaveProperty("available");
@@ -70,5 +70,22 @@ describe("api", () => {
     const second = await request(limitedApp).get("/rolls").set("x-api-key", apiKey);
     expect(second.status).toBe(429);
     expect(second.body.error).toBe("rate_limit_exceeded");
+  });
+
+  it("keeps legacy route aliases for compatibility", async () => {
+    const bet = await request(app).post("/bet").set("x-api-key", apiKey).send({
+      serverSeed: "legacy-server",
+      clientSeed: "legacy-client",
+      nonce: 2,
+      amount: 5,
+      target: 60,
+    });
+    expect(bet.status).toBe(201);
+
+    const rolls = await request(app).get("/rolls").set("x-api-key", apiKey);
+    expect(rolls.status).toBe(200);
+
+    const bankroll = await request(app).get("/bankroll").set("x-api-key", apiKey);
+    expect(bankroll.status).toBe(200);
   });
 });
