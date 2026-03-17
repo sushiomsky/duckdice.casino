@@ -212,6 +212,28 @@ function perMinuteRate(count, lookbackMinutes) {
   return Number((count / lookbackMinutes).toFixed(4));
 }
 
+function metricComparison(current, previous) {
+  const delta = current - previous;
+  return {
+    current,
+    previous,
+    delta,
+    deltaPct: previous > 0 ? Number((delta / previous).toFixed(4)) : null
+  };
+}
+
+function mapMetricComparisons(currentMap, previousMap) {
+  const keys = new Set([...Object.keys(currentMap), ...Object.keys(previousMap)]);
+  return Object.fromEntries(
+    [...keys]
+      .sort()
+      .map((key) => [
+        key,
+        metricComparison(currentMap[key] || 0, previousMap[key] || 0)
+      ])
+  );
+}
+
 function parseRateLimitKey(key) {
   if (!key.startsWith("rate:")) {
     return null;
@@ -837,6 +859,7 @@ app.get("/v1/admin/actions", requireApiKey("admin"), async (req, res) => {
 app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
   const rawLookbackMinutes = req.query.lookbackMinutes;
   const rawIncludeRateLimitDetails = req.query.includeRateLimitDetails;
+  const rawComparePreviousWindow = req.query.comparePreviousWindow;
   const rawTopN = req.query.topN;
   const lookbackMinutes = rawLookbackMinutes === undefined ? 60 : Number(rawLookbackMinutes);
   if (!Number.isInteger(lookbackMinutes) || lookbackMinutes <= 0 || lookbackMinutes > config.metricsRetentionMinutes) {
@@ -852,30 +875,55 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
       return res.status(400).json({ error: "invalid_include_rate_limit_details" });
     }
   }
+  let comparePreviousWindow = false;
+  if (rawComparePreviousWindow !== undefined) {
+    if (rawComparePreviousWindow === "true" || rawComparePreviousWindow === "1") {
+      comparePreviousWindow = true;
+    } else if (rawComparePreviousWindow === "false" || rawComparePreviousWindow === "0") {
+      comparePreviousWindow = false;
+    } else {
+      return res.status(400).json({ error: "invalid_compare_previous_window" });
+    }
+  }
   const topN = rawTopN === undefined ? 10 : Number(rawTopN);
   if (!Number.isInteger(topN) || topN <= 0 || topN > 50) {
     return res.status(400).json({ error: "invalid_top_n" });
   }
 
-  const since = new Date(Date.now() - lookbackMinutes * 60_000).toISOString();
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const since = new Date(nowMs - lookbackMinutes * 60_000).toISOString();
+  const previousSince = new Date(nowMs - (lookbackMinutes * 2) * 60_000).toISOString();
   try {
     const [
       rateLimitExceeded,
       rateLimitDiagnostics,
       adminTotalQuery,
+      previousAdminTotalQuery,
       adminByActionQuery,
       betByStatusQuery,
+      previousBetByStatusQuery,
       failedByReasonQuery,
       diceSettleMetrics,
       riskEvaluateMetrics,
       riskReleaseMetrics,
       acceptedEvents,
       rejectedEvents,
-      errorEvents
+      errorEvents,
+      previousRateLimitExceeded,
+      previousAcceptedEvents,
+      previousRejectedEvents,
+      previousErrorEvents
     ] = await Promise.all([
       sumMetric("rate_limit_exceeded", lookbackMinutes),
       includeRateLimitDetails ? readRateLimitDiagnostics(topN) : null,
       pgPool.query("SELECT COUNT(*)::int AS count FROM admin_actions WHERE created_at >= $1", [since]),
+      comparePreviousWindow
+        ? pgPool.query(
+          "SELECT COUNT(*)::int AS count FROM admin_actions WHERE created_at >= $1 AND created_at < $2",
+          [previousSince, since]
+        )
+        : null,
       pgPool.query(
         `
           SELECT action, COUNT(*)::int AS count
@@ -896,6 +944,19 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
         `,
         [since]
       ),
+      comparePreviousWindow
+        ? pgPool.query(
+          `
+            SELECT status, COUNT(*)::int AS count
+            FROM bets
+            WHERE created_at >= $1
+              AND created_at < $2
+            GROUP BY status
+            ORDER BY status
+          `,
+          [previousSince, since]
+        )
+        : null,
       pgPool.query(
         `
           SELECT
@@ -922,7 +983,19 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
       readInternalCallTelemetry("risk_release", lookbackMinutes),
       sumMetric("event_published:bet.accepted", lookbackMinutes),
       sumMetric("event_published:bet.rejected", lookbackMinutes),
-      sumMetric("event_published:bet.error", lookbackMinutes)
+      sumMetric("event_published:bet.error", lookbackMinutes),
+      comparePreviousWindow
+        ? sumMetric("rate_limit_exceeded", lookbackMinutes, nowMs - lookbackMinutes * 60_000)
+        : null,
+      comparePreviousWindow
+        ? sumMetric("event_published:bet.accepted", lookbackMinutes, nowMs - lookbackMinutes * 60_000)
+        : null,
+      comparePreviousWindow
+        ? sumMetric("event_published:bet.rejected", lookbackMinutes, nowMs - lookbackMinutes * 60_000)
+        : null,
+      comparePreviousWindow
+        ? sumMetric("event_published:bet.error", lookbackMinutes, nowMs - lookbackMinutes * 60_000)
+        : null
     ]);
 
     const adminByAction = Object.fromEntries(
@@ -940,9 +1013,41 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
       riskRelease: riskReleaseMetrics
     };
     const totalEvents = acceptedEvents + rejectedEvents + errorEvents;
+    const comparison = comparePreviousWindow
+      ? (() => {
+        const previousBetByStatus = Object.fromEntries(
+          previousBetByStatusQuery.rows.map((row) => [row.status, Number(row.count)])
+        );
+        const previousEventsTotal = previousAcceptedEvents + previousRejectedEvents + previousErrorEvents;
+        return {
+          window: {
+            current: {
+              from: since,
+              to: nowIso
+            },
+            previous: {
+              from: previousSince,
+              to: since
+            }
+          },
+          rateLimitExceeded: metricComparison(rateLimitExceeded, previousRateLimitExceeded),
+          adminActionsTotal: metricComparison(
+            Number(adminTotalQuery.rows[0]?.count || 0),
+            Number(previousAdminTotalQuery.rows[0]?.count || 0)
+          ),
+          eventsPublished: {
+            accepted: metricComparison(acceptedEvents, previousAcceptedEvents),
+            rejected: metricComparison(rejectedEvents, previousRejectedEvents),
+            error: metricComparison(errorEvents, previousErrorEvents),
+            total: metricComparison(totalEvents, previousEventsTotal)
+          },
+          betsByStatus: mapMetricComparisons(betByStatus, previousBetByStatus)
+        };
+      })()
+      : undefined;
 
     return res.status(200).json({
-      generatedAt: new Date().toISOString(),
+      generatedAt: nowIso,
       lookbackMinutes,
       rateLimit: {
         windowMs: config.rateLimitWindowMs,
@@ -972,7 +1077,8 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
           error: perMinuteRate(errorEvents, lookbackMinutes),
           total: perMinuteRate(totalEvents, lookbackMinutes)
         }
-      }
+      },
+      comparison
     });
   } catch (error) {
     return res.status(500).json({ error: "admin_stats_failed", detail: toDetail(error) });
