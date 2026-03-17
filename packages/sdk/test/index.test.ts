@@ -43,4 +43,36 @@ describe("sdk", () => {
       }),
     });
   });
+
+  it("calls v1 bankroll endpoint with auth header", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ bankroll: 1000, exposure: 100, available: 900 }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const client = new DuckDiceClient("http://api", { apiKey: "test-key" });
+    const bankroll = await client.getBankroll();
+    expect(bankroll.available).toBe(900);
+
+    expect(mockFetch).toHaveBeenCalledWith("http://api/v1/bankroll", {
+      headers: { "x-api-key": "test-key" },
+    });
+  });
+
+  it("calls v1 rolls endpoint with auth header", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ rolls: [{ id: 1, won: true }] }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const client = new DuckDiceClient("http://api", { apiKey: "test-key" });
+    const history = await client.getRollHistory();
+    expect(history.rolls).toHaveLength(1);
+
+    expect(mockFetch).toHaveBeenCalledWith("http://api/v1/rolls", {
+      headers: { "x-api-key": "test-key" },
+    });
+  });
 });
