@@ -48,6 +48,16 @@ const authState = {
 const AUTH_STATE_KEY = "auth:keys";
 const METRIC_PREFIX = "metrics";
 const LATENCY_BUCKETS_MS = [5, 10, 25, 50, 100, 250, 500, 1000, 2000, 5000];
+const ENDPOINT_METRIC_LABELS = {
+  post_bets: "POST /v1/bets",
+  post_exposure_release: "POST /v1/exposure/release",
+  post_admin_keys_rotate: "POST /v1/admin/keys/rotate",
+  get_admin_actions: "GET /v1/admin/actions",
+  get_admin_stats: "GET /v1/admin/stats",
+  get_bets: "GET /v1/bets",
+  get_bet_by_id: "GET /v1/bets/:betId",
+  other: "other"
+};
 
 let rabbitChannel;
 let pgPool;
@@ -231,6 +241,33 @@ function mapMetricComparisons(currentMap, previousMap) {
         key,
         metricComparison(currentMap[key] || 0, previousMap[key] || 0)
       ])
+  );
+}
+
+function endpointMetricKey(method, path) {
+  const normalizedPath = path.startsWith("/v1")
+    ? path
+    : `/v1${path.startsWith("/") ? path : `/${path}`}`;
+  const upperMethod = method.toUpperCase();
+  if (upperMethod === "POST" && normalizedPath === "/v1/bets") return "post_bets";
+  if (upperMethod === "POST" && normalizedPath === "/v1/exposure/release") return "post_exposure_release";
+  if (upperMethod === "POST" && normalizedPath === "/v1/admin/keys/rotate") return "post_admin_keys_rotate";
+  if (upperMethod === "GET" && normalizedPath === "/v1/admin/actions") return "get_admin_actions";
+  if (upperMethod === "GET" && normalizedPath === "/v1/admin/stats") return "get_admin_stats";
+  if (upperMethod === "GET" && normalizedPath === "/v1/bets") return "get_bets";
+  if (upperMethod === "GET" && isUuid(normalizedPath.replace("/v1/bets/", "")) && normalizedPath.startsWith("/v1/bets/")) {
+    return "get_bet_by_id";
+  }
+  return "other";
+}
+
+function statusClass(statusCode) {
+  return `${Math.floor(statusCode / 100)}xx`;
+}
+
+function toComparableEndpointCounts(byKey) {
+  return Object.fromEntries(
+    Object.entries(byKey).map(([key, count]) => [ENDPOINT_METRIC_LABELS[key] || key, count])
   );
 }
 
@@ -516,6 +553,17 @@ async function readInternalCallErrorBreakdown(name, lookbackMinutes, topN = 5) {
   );
 }
 
+async function recordEndpointRequestMetrics(metricKey, statusCode) {
+  try {
+    await Promise.all([
+      incrementMetric(`endpoint_request:${metricKey}:count`),
+      incrementMetric(`endpoint_request:${metricKey}:status:${statusClass(statusCode)}`)
+    ]);
+  } catch (error) {
+    console.error("endpoint request metric increment failed", error.message);
+  }
+}
+
 async function readInternalCallTelemetry(name, lookbackMinutes) {
   const [calls, errors, latencyMsSum, errorByType, ...bucketValues] = await Promise.all([
     sumMetric(`internal_call:${name}:count`, lookbackMinutes),
@@ -545,6 +593,41 @@ async function readInternalCallTelemetry(name, lookbackMinutes) {
     p50LatencyMs: latencyPercentileFromBuckets(buckets, 0.5),
     p95LatencyMs: latencyPercentileFromBuckets(buckets, 0.95),
     latencyBuckets: buckets
+  };
+}
+
+async function readEndpointRequestTelemetry(lookbackMinutes, timestampMs = Date.now()) {
+  const entries = await Promise.all(
+    Object.entries(ENDPOINT_METRIC_LABELS).map(async ([key, label]) => {
+      const [total, s2, s4, s5] = await Promise.all([
+        sumMetric(`endpoint_request:${key}:count`, lookbackMinutes, timestampMs),
+        sumMetric(`endpoint_request:${key}:status:2xx`, lookbackMinutes, timestampMs),
+        sumMetric(`endpoint_request:${key}:status:4xx`, lookbackMinutes, timestampMs),
+        sumMetric(`endpoint_request:${key}:status:5xx`, lookbackMinutes, timestampMs)
+      ]);
+      return {
+        key,
+        label,
+        total,
+        status: {
+          "2xx": s2,
+          "4xx": s4,
+          "5xx": s5
+        }
+      };
+    })
+  );
+
+  const active = entries.filter((entry) => entry.total > 0);
+  const byEndpoint = Object.fromEntries(
+    active.map((entry) => [entry.label, { total: entry.total, status: entry.status }])
+  );
+  const byKey = Object.fromEntries(entries.map((entry) => [entry.key, entry.total]));
+  const total = entries.reduce((sum, entry) => sum + entry.total, 0);
+  return {
+    total,
+    byEndpoint,
+    byKey
   };
 }
 
@@ -755,6 +838,13 @@ app.get("/health", (_req, res) => {
 });
 
 app.use("/v1", requireApiKey("backend"), rateLimitMiddleware(config.rateLimitWindowMs, config.rateLimitMaxRequests));
+app.use("/v1", (req, res, next) => {
+  const metricKey = endpointMetricKey(req.method, req.path);
+  res.on("finish", () => {
+    recordEndpointRequestMetrics(metricKey, res.statusCode);
+  });
+  next();
+});
 
 app.post("/v1/admin/keys/rotate", requireApiKey("admin"), async (req, res) => {
   const { target, newKey } = req.body;
@@ -948,7 +1038,7 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
   if (!Number.isInteger(topN) || topN <= 0 || topN > 50) {
     return res.status(400).json({ error: "invalid_top_n" });
   }
-  const allowedFields = new Set(["rateLimit", "adminActions", "internalCalls", "bets", "events", "alerts", "comparison"]);
+  const allowedFields = new Set(["rateLimit", "adminActions", "internalCalls", "bets", "events", "alerts", "comparison", "requestVolumes"]);
   let fieldsFilter = null;
   if (rawFields !== undefined) {
     const requested = String(rawFields)
@@ -978,6 +1068,8 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
       diceSettleMetrics,
       riskEvaluateMetrics,
       riskReleaseMetrics,
+      requestVolumes,
+      previousRequestVolumes,
       acceptedEvents,
       rejectedEvents,
       errorEvents,
@@ -1052,6 +1144,10 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
       readInternalCallTelemetry("dice_settle", lookbackMinutes),
       readInternalCallTelemetry("risk_evaluate", lookbackMinutes),
       readInternalCallTelemetry("risk_release", lookbackMinutes),
+      readEndpointRequestTelemetry(lookbackMinutes),
+      comparePreviousWindow
+        ? readEndpointRequestTelemetry(lookbackMinutes, nowMs - lookbackMinutes * 60_000)
+        : null,
       sumMetric("event_published:bet.accepted", lookbackMinutes),
       sumMetric("event_published:bet.rejected", lookbackMinutes),
       sumMetric("event_published:bet.error", lookbackMinutes),
@@ -1125,7 +1221,11 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
             error: metricComparison(errorEvents, previousErrorEvents),
             total: metricComparison(totalEvents, previousEventsTotal)
           },
-          betsByStatus: mapMetricComparisons(betByStatus, previousBetByStatus)
+          betsByStatus: mapMetricComparisons(betByStatus, previousBetByStatus),
+          requestVolumesByEndpoint: mapMetricComparisons(
+            toComparableEndpointCounts(requestVolumes.byKey),
+            toComparableEndpointCounts(previousRequestVolumes.byKey)
+          )
         };
       })()
       : undefined;
@@ -1144,6 +1244,10 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
         byAction: adminByAction
       },
       internalCalls,
+      requestVolumes: {
+        total: requestVolumes.total,
+        byEndpoint: requestVolumes.byEndpoint
+      },
       bets: {
         byStatus: betByStatus,
         failedByReason
