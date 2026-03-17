@@ -127,6 +127,9 @@ function publishEvent(routingKey, payload) {
     contentType: "application/json",
     persistent: true
   });
+  incrementMetric(`event_published:${routingKey}`).catch((error) => {
+    console.error("event metric increment failed", error.message);
+  });
 }
 
 function toDetail(error) {
@@ -191,6 +194,10 @@ async function sumMetric(name, lookbackMinutes, timestampMs = Date.now()) {
 
   const values = await redisClient.mGet(keys);
   return values.reduce((sum, value) => sum + Number.parseInt(value || "0", 10), 0);
+}
+
+function perMinuteRate(count, lookbackMinutes) {
+  return Number((count / lookbackMinutes).toFixed(4));
 }
 
 async function persistBet(record) {
@@ -624,6 +631,7 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
       adminTotalQuery,
       adminByActionQuery,
       betByStatusQuery,
+      failedByReasonQuery,
       diceSettleCalls,
       diceSettleErrors,
       diceSettleLatencyMs,
@@ -632,7 +640,10 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
       riskEvaluateLatencyMs,
       riskReleaseCalls,
       riskReleaseErrors,
-      riskReleaseLatencyMs
+      riskReleaseLatencyMs,
+      acceptedEvents,
+      rejectedEvents,
+      errorEvents
     ] = await Promise.all([
       sumMetric("rate_limit_exceeded", lookbackMinutes),
       pgPool.query("SELECT COUNT(*)::int AS count FROM admin_actions WHERE created_at >= $1", [since]),
@@ -656,6 +667,27 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
         `,
         [since]
       ),
+      pgPool.query(
+        `
+          SELECT
+            COALESCE(
+              error_detail->>'reason',
+              error_detail->>'error',
+              error_detail->'detail'->>'reason',
+              error_detail->'detail'->>'error',
+              error_detail->'detail'->>'message',
+              error_detail->>'message',
+              'unknown'
+            ) AS reason,
+            COUNT(*)::int AS count
+          FROM bets
+          WHERE created_at >= $1
+            AND status IN ('rejected', 'error')
+          GROUP BY reason
+          ORDER BY count DESC, reason
+        `,
+        [since]
+      ),
       sumMetric("internal_call:dice_settle:count", lookbackMinutes),
       sumMetric("internal_call:dice_settle:error", lookbackMinutes),
       sumMetric("internal_call:dice_settle:latency_ms_sum", lookbackMinutes),
@@ -664,7 +696,10 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
       sumMetric("internal_call:risk_evaluate:latency_ms_sum", lookbackMinutes),
       sumMetric("internal_call:risk_release:count", lookbackMinutes),
       sumMetric("internal_call:risk_release:error", lookbackMinutes),
-      sumMetric("internal_call:risk_release:latency_ms_sum", lookbackMinutes)
+      sumMetric("internal_call:risk_release:latency_ms_sum", lookbackMinutes),
+      sumMetric("event_published:bet.accepted", lookbackMinutes),
+      sumMetric("event_published:bet.rejected", lookbackMinutes),
+      sumMetric("event_published:bet.error", lookbackMinutes)
     ]);
 
     const adminByAction = Object.fromEntries(
@@ -672,6 +707,9 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
     );
     const betByStatus = Object.fromEntries(
       betByStatusQuery.rows.map((row) => [row.status, Number(row.count)])
+    );
+    const failedByReason = Object.fromEntries(
+      failedByReasonQuery.rows.map((row) => [row.reason, Number(row.count)])
     );
     const internalCalls = Object.fromEntries(
       [
@@ -711,6 +749,7 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
         ];
       })
     );
+    const totalEvents = acceptedEvents + rejectedEvents + errorEvents;
 
     return res.status(200).json({
       generatedAt: new Date().toISOString(),
@@ -726,7 +765,22 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
       },
       internalCalls,
       bets: {
-        byStatus: betByStatus
+        byStatus: betByStatus,
+        failedByReason
+      },
+      events: {
+        published: {
+          accepted: acceptedEvents,
+          rejected: rejectedEvents,
+          error: errorEvents,
+          total: totalEvents
+        },
+        ratePerMinute: {
+          accepted: perMinuteRate(acceptedEvents, lookbackMinutes),
+          rejected: perMinuteRate(rejectedEvents, lookbackMinutes),
+          error: perMinuteRate(errorEvents, lookbackMinutes),
+          total: perMinuteRate(totalEvents, lookbackMinutes)
+        }
       }
     });
   } catch (error) {
