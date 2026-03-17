@@ -73,6 +73,7 @@ services:
       - REDIS_URL=redis://redis:6379
       - BET_CACHE_TTL_SEC=300
       - BACKEND_API_KEY=duckdice-backend-key
+      - ADMIN_API_KEY=duckdice-admin-key
       - INTERNAL_API_TOKEN=duckdice-internal-token
       - RATE_LIMIT_WINDOW_MS=60000
       - RATE_LIMIT_MAX_REQUESTS=120

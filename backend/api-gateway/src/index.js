@@ -20,6 +20,7 @@ function getSecret(envName, fallback) {
 const config = {
   port: Number(process.env.PORT || 4000),
   backendApiKey: getSecret("BACKEND_API_KEY", "duckdice-backend-key"),
+  adminApiKey: getSecret("ADMIN_API_KEY", "duckdice-admin-key"),
   internalApiToken: getSecret("INTERNAL_API_TOKEN", "duckdice-internal-token"),
   rateLimitWindowMs: Number(process.env.RATE_LIMIT_WINDOW_MS || 60_000),
   rateLimitMaxRequests: Number(process.env.RATE_LIMIT_MAX_REQUESTS || 120),
@@ -30,6 +31,11 @@ const config = {
   postgresUrl: process.env.POSTGRES_URL || "postgres://duckdice:duckdice@postgres:5432/duckdice",
   redisUrl: process.env.REDIS_URL || "redis://redis:6379",
   cacheTtlSec: Number(process.env.BET_CACHE_TTL_SEC || 300)
+};
+
+const authState = {
+  backendApiKey: config.backendApiKey,
+  adminApiKey: config.adminApiKey
 };
 
 let rabbitChannel;
@@ -151,12 +157,20 @@ function internalRequestConfig() {
   };
 }
 
-function apiKeyAuth(expectedApiKey) {
+function requireApiKey(scope) {
   return (req, res, next) => {
     const apiKey = req.header("x-api-key");
-    if (!apiKey || apiKey !== expectedApiKey) {
+    if (!apiKey) {
       return res.status(401).json({ error: "unauthorized" });
     }
+
+    const isAdmin = apiKey === authState.adminApiKey;
+    const isBackend = apiKey === authState.backendApiKey;
+    const allowed = scope === "admin" ? isAdmin : (isAdmin || isBackend);
+    if (!allowed) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+
     return next();
   };
 }
@@ -221,7 +235,26 @@ app.get("/health", (_req, res) => {
   });
 });
 
-app.use("/v1", apiKeyAuth(config.backendApiKey), rateLimitMiddleware(config.rateLimitWindowMs, config.rateLimitMaxRequests));
+app.use("/v1", requireApiKey("backend"), rateLimitMiddleware(config.rateLimitWindowMs, config.rateLimitMaxRequests));
+
+app.post("/v1/admin/keys/rotate", requireApiKey("admin"), (req, res) => {
+  const { target, newKey } = req.body;
+  if (target !== "backend" && target !== "admin") {
+    return res.status(400).json({ error: "invalid_target" });
+  }
+  if (typeof newKey !== "string" || newKey.trim().length < 16) {
+    return res.status(400).json({ error: "invalid_new_key" });
+  }
+
+  const value = newKey.trim();
+  if (target === "backend") {
+    authState.backendApiKey = value;
+  } else {
+    authState.adminApiKey = value;
+  }
+
+  return res.status(200).json({ rotated: target, updatedAt: new Date().toISOString() });
+});
 
 app.post("/v1/bets", async (req, res) => {
   const validationError = validateBetPayload(req.body);
@@ -290,7 +323,7 @@ app.post("/v1/bets", async (req, res) => {
   }
 });
 
-app.post("/v1/exposure/release", async (req, res) => {
+app.post("/v1/exposure/release", requireApiKey("admin"), async (req, res) => {
   const validationError = validateReleasePayload(req.body);
   if (validationError) {
     return res.status(400).json({ error: validationError });
