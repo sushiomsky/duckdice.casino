@@ -10,7 +10,7 @@ Public backend gateway that orchestrates bet settlement with:
 ## Security
 - `GET /health` is public.
 - All `/v1/*` endpoints require `x-api-key` matching `BACKEND_API_KEY`.
-- In-memory rate limiting is applied to `/v1/*` requests.
+- Redis-backed rate limiting is applied to `/v1/*` requests using `ip + api key` buckets.
 - Gateway-to-engine calls include `x-internal-token` and require matching `INTERNAL_API_TOKEN` on internal services.
 
 ## Endpoints

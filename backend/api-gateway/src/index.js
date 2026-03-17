@@ -153,24 +153,28 @@ function apiKeyAuth(expectedApiKey) {
 }
 
 function rateLimitMiddleware(windowMs, maxRequests) {
-  const requests = new Map();
+  return async (req, res, next) => {
+    const key = `rate:${req.ip}:${req.header("x-api-key") || ""}`;
 
-  return (req, res, next) => {
-    const key = `${req.ip}:${req.header("x-api-key") || ""}`;
-    const now = Date.now();
-    const existing = requests.get(key);
+    try {
+      const count = await redisClient.incr(key);
+      if (count === 1) {
+        await redisClient.pExpire(key, windowMs);
+      }
 
-    if (!existing || now >= existing.resetAt) {
-      requests.set(key, { count: 1, resetAt: now + windowMs });
+      const ttlMs = await redisClient.pTTL(key);
+      if (count > maxRequests) {
+        return res.status(429).json({
+          error: "rate_limit_exceeded",
+          retryAfterMs: ttlMs > 0 ? ttlMs : windowMs
+        });
+      }
+
       return next();
+    } catch (error) {
+      console.error("rate limit backend unavailable", error.message);
+      return res.status(503).json({ error: "rate_limit_unavailable" });
     }
-
-    if (existing.count >= maxRequests) {
-      return res.status(429).json({ error: "rate_limit_exceeded", retryAfterMs: existing.resetAt - now });
-    }
-
-    existing.count += 1;
-    return next();
   };
 }
 
