@@ -172,6 +172,15 @@ async function incrementMetric(name, timestampMs = Date.now()) {
   }
 }
 
+async function incrementMetricBy(name, amount, timestampMs = Date.now()) {
+  const bucket = minuteBucket(timestampMs);
+  const key = metricKey(name, bucket);
+  const count = await redisClient.incrBy(key, amount);
+  if (count === amount) {
+    await redisClient.expire(key, config.metricsRetentionMinutes * 60);
+  }
+}
+
 async function sumMetric(name, lookbackMinutes, timestampMs = Date.now()) {
   const bounded = Math.max(1, Math.min(lookbackMinutes, config.metricsRetentionMinutes));
   const latestBucket = minuteBucket(timestampMs);
@@ -269,6 +278,39 @@ async function recordAdminAction(action, actorApiKey, details) {
     await incrementMetric(`admin_action:${action}`);
   } catch (error) {
     console.error("admin action metric increment failed", error.message);
+  }
+}
+
+async function recordInternalCallMetrics(name, startedAtMs, success) {
+  const elapsedMs = Math.max(0, Date.now() - startedAtMs);
+  try {
+    await Promise.all([
+      incrementMetric(`internal_call:${name}:count`),
+      incrementMetricBy(`internal_call:${name}:latency_ms_sum`, elapsedMs),
+      success ? Promise.resolve() : incrementMetric(`internal_call:${name}:error`)
+    ]);
+  } catch (error) {
+    console.error("internal call metric increment failed", error.message);
+  }
+}
+
+async function postInternalService(name, url, payload, path) {
+  const startedAtMs = Date.now();
+  try {
+    const response = await axios.post(
+      url,
+      payload,
+      internalRequestConfig({
+        method: "POST",
+        path,
+        payload
+      })
+    );
+    await recordInternalCallMetrics(name, startedAtMs, true);
+    return response;
+  } catch (error) {
+    await recordInternalCallMetrics(name, startedAtMs, false);
+    throw error;
   }
 }
 
@@ -460,33 +502,24 @@ app.post("/v1/bets", async (req, res) => {
   const requestPayload = { ...req.body };
 
   try {
-    const settleResponse = await axios.post(
+    const settleResponse = await postInternalService(
+      "dice_settle",
       `${config.diceEngineUrl}/v1/settle`,
       req.body,
-      internalRequestConfig({
-        method: "POST",
-        path: "/v1/settle",
-        payload: req.body
-      })
+      "/v1/settle"
     );
     const settlement = settleResponse.data;
 
-    const riskResponse = await axios.post(
+    const riskPayload = {
+      requestedPayout: settlement.payout,
+      commit: true
+    };
+    const riskResponse = await postInternalService(
+      "risk_evaluate",
       `${config.riskEngineUrl}/v1/evaluate`,
-      {
-        requestedPayout: settlement.payout,
-        commit: true
-      },
-      internalRequestConfig({
-        method: "POST",
-        path: "/v1/evaluate",
-        payload: {
-          requestedPayout: settlement.payout,
-          commit: true
-        }
-      })
+      riskPayload,
+      "/v1/evaluate"
     );
-
     const risk = riskResponse.data;
     const betRecord = {
       betId,
@@ -534,14 +567,11 @@ app.post("/v1/exposure/release", requireApiKey("admin"), async (req, res) => {
   }
 
   try {
-    const response = await axios.post(
+    const response = await postInternalService(
+      "risk_release",
       `${config.riskEngineUrl}/v1/release`,
       req.body,
-      internalRequestConfig({
-        method: "POST",
-        path: "/v1/release",
-        payload: req.body
-      })
+      "/v1/release"
     );
     try {
       await recordAdminAction("exposure_release", req.auth.apiKey, { amount: req.body.amount });
@@ -564,13 +594,15 @@ app.get("/v1/admin/actions", requireApiKey("admin"), async (req, res) => {
 
   try {
     const query = await pgPool.query(
-      `
-        SELECT action_id, created_at, actor_key_hash, action, details
-        FROM admin_actions
-        ORDER BY created_at DESC
-        LIMIT $1
-      `,
-      [parsed]
+      {
+        text: `
+          SELECT action_id, created_at, actor_key_hash, action, details
+          FROM admin_actions
+          ORDER BY created_at DESC
+          LIMIT $1
+        `,
+        values: [parsed]
+      },
     );
     return res.status(200).json({ actions: query.rows.map(adminRowToAction) });
   } catch (error) {
@@ -591,7 +623,16 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
       rateLimitExceeded,
       adminTotalQuery,
       adminByActionQuery,
-      betByStatusQuery
+      betByStatusQuery,
+      diceSettleCalls,
+      diceSettleErrors,
+      diceSettleLatencyMs,
+      riskEvaluateCalls,
+      riskEvaluateErrors,
+      riskEvaluateLatencyMs,
+      riskReleaseCalls,
+      riskReleaseErrors,
+      riskReleaseLatencyMs
     ] = await Promise.all([
       sumMetric("rate_limit_exceeded", lookbackMinutes),
       pgPool.query("SELECT COUNT(*)::int AS count FROM admin_actions WHERE created_at >= $1", [since]),
@@ -614,14 +655,61 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
           ORDER BY status
         `,
         [since]
-      )
+      ),
+      sumMetric("internal_call:dice_settle:count", lookbackMinutes),
+      sumMetric("internal_call:dice_settle:error", lookbackMinutes),
+      sumMetric("internal_call:dice_settle:latency_ms_sum", lookbackMinutes),
+      sumMetric("internal_call:risk_evaluate:count", lookbackMinutes),
+      sumMetric("internal_call:risk_evaluate:error", lookbackMinutes),
+      sumMetric("internal_call:risk_evaluate:latency_ms_sum", lookbackMinutes),
+      sumMetric("internal_call:risk_release:count", lookbackMinutes),
+      sumMetric("internal_call:risk_release:error", lookbackMinutes),
+      sumMetric("internal_call:risk_release:latency_ms_sum", lookbackMinutes)
     ]);
 
     const adminByAction = Object.fromEntries(
-      adminByActionQuery.rows.map((row) => [row.action, row.count])
+      adminByActionQuery.rows.map((row) => [row.action, Number(row.count)])
     );
     const betByStatus = Object.fromEntries(
-      betByStatusQuery.rows.map((row) => [row.status, row.count])
+      betByStatusQuery.rows.map((row) => [row.status, Number(row.count)])
+    );
+    const internalCalls = Object.fromEntries(
+      [
+        {
+          key: "diceSettle",
+          calls: diceSettleCalls,
+          errors: diceSettleErrors,
+          latencyMsSum: diceSettleLatencyMs
+        },
+        {
+          key: "riskEvaluate",
+          calls: riskEvaluateCalls,
+          errors: riskEvaluateErrors,
+          latencyMsSum: riskEvaluateLatencyMs
+        },
+        {
+          key: "riskRelease",
+          calls: riskReleaseCalls,
+          errors: riskReleaseErrors,
+          latencyMsSum: riskReleaseLatencyMs
+        }
+      ].map((entry) => {
+        const avgLatencyMs = entry.calls > 0
+          ? Number((entry.latencyMsSum / entry.calls).toFixed(2))
+          : 0;
+        const errorRate = entry.calls > 0
+          ? Number((entry.errors / entry.calls).toFixed(4))
+          : 0;
+        return [
+          entry.key,
+          {
+            calls: entry.calls,
+            errors: entry.errors,
+            errorRate,
+            avgLatencyMs
+          }
+        ];
+      })
     );
 
     return res.status(200).json({
@@ -633,9 +721,10 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
         exceeded: rateLimitExceeded
       },
       adminActions: {
-        total: adminTotalQuery.rows[0]?.count || 0,
+        total: Number(adminTotalQuery.rows[0]?.count || 0),
         byAction: adminByAction
       },
+      internalCalls,
       bets: {
         byStatus: betByStatus
       }

@@ -28,4 +28,4 @@ Public backend gateway that orchestrates bet settlement with:
 - `GET /v1/bets?limit=20`
 - `POST /v1/admin/keys/rotate`
 - `GET /v1/admin/actions?limit=20`
-- `GET /v1/admin/stats?lookbackMinutes=60` (admin telemetry: rate-limit saturation, admin action volume, bet status counts)
+- `GET /v1/admin/stats?lookbackMinutes=60` (admin telemetry: rate-limit saturation, admin action volume, internal call latency/error rollups, bet status counts)
