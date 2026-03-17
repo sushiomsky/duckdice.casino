@@ -1,5 +1,5 @@
 import express, { type NextFunction, type Request, type Response } from "express";
-import { settleBet } from "@duckdice/dice-engine";
+import { NonceTracker, settleBet } from "@duckdice/dice-engine";
 import { evaluateBet, type RiskConfig } from "@duckdice/risk-engine";
 
 export interface BetRequest {
@@ -122,6 +122,7 @@ export function createApp(partialState?: Partial<ApiState>) {
   };
 
   const app = express();
+  const nonceTracker = new NonceTracker();
   app.use(express.json());
   app.use(rateLimitMiddleware(state.rateLimit.windowMs, state.rateLimit.maxRequests));
 
@@ -138,6 +139,7 @@ export function createApp(partialState?: Partial<ApiState>) {
       if (chance === undefined) {
         throw new Error("chance is required");
       }
+      nonceTracker.track(serverSeed, clientSeed, nonce);
       const normalizedRollOver = rollOver ?? false;
       const edgeBps = houseEdgeBps ?? 100;
       const preview = settleBet({

@@ -88,4 +88,33 @@ describe("api", () => {
     const bankroll = await request(app).get("/bankroll").set("x-api-key", apiKey);
     expect(bankroll.status).toBe(200);
   });
+
+  it("rejects duplicate nonce for same server and client seed pair", async () => {
+    const nonceApp = createApp({
+      exposure: 0,
+      apiKey,
+      rolls: [],
+      risk: { bankroll: 1000, riskFactor: 0.05, maxExposure: 100, maxPayout: 200 },
+      rateLimit: { windowMs: 60_000, maxRequests: 10 },
+    });
+
+    const first = await request(nonceApp).post("/v1/bets").set("x-api-key", apiKey).send({
+      serverSeed: "nonce-server",
+      clientSeed: "nonce-client",
+      nonce: 1,
+      amount: 5,
+      target: 60,
+    });
+    expect(first.status).toBe(201);
+
+    const duplicate = await request(nonceApp).post("/v1/bets").set("x-api-key", apiKey).send({
+      serverSeed: "nonce-server",
+      clientSeed: "nonce-client",
+      nonce: 1,
+      amount: 5,
+      target: 60,
+    });
+    expect(duplicate.status).toBe(400);
+    expect(duplicate.body.error).toContain("nonce must strictly increase");
+  });
 });
