@@ -10,6 +10,9 @@ app.use(express.json());
 
 const config = {
   port: Number(process.env.PORT || 4000),
+  backendApiKey: process.env.BACKEND_API_KEY || "duckdice-backend-key",
+  rateLimitWindowMs: Number(process.env.RATE_LIMIT_WINDOW_MS || 60_000),
+  rateLimitMaxRequests: Number(process.env.RATE_LIMIT_MAX_REQUESTS || 120),
   diceEngineUrl: process.env.DICE_ENGINE_URL || "http://dice-engine:4001",
   riskEngineUrl: process.env.RISK_ENGINE_URL || "http://risk-engine:4002",
   rabbitUrl: process.env.RABBITMQ_URL || "amqp://rabbitmq:5672",
@@ -129,6 +132,60 @@ async function cacheBet(record) {
   await redisClient.set(`bet:${record.betId}`, JSON.stringify(record), { EX: config.cacheTtlSec });
 }
 
+function apiKeyAuth(expectedApiKey) {
+  return (req, res, next) => {
+    const apiKey = req.header("x-api-key");
+    if (!apiKey || apiKey !== expectedApiKey) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+    return next();
+  };
+}
+
+function rateLimitMiddleware(windowMs, maxRequests) {
+  const requests = new Map();
+
+  return (req, res, next) => {
+    const key = `${req.ip}:${req.header("x-api-key") || ""}`;
+    const now = Date.now();
+    const existing = requests.get(key);
+
+    if (!existing || now >= existing.resetAt) {
+      requests.set(key, { count: 1, resetAt: now + windowMs });
+      return next();
+    }
+
+    if (existing.count >= maxRequests) {
+      return res.status(429).json({ error: "rate_limit_exceeded", retryAfterMs: existing.resetAt - now });
+    }
+
+    existing.count += 1;
+    return next();
+  };
+}
+
+function validateBetPayload(payload) {
+  if (!payload || typeof payload !== "object") return "invalid_payload";
+  if (typeof payload.serverSeed !== "string" || payload.serverSeed.trim() === "") return "invalid_server_seed";
+  if (typeof payload.clientSeed !== "string" || payload.clientSeed.trim() === "") return "invalid_client_seed";
+  if (!Number.isInteger(payload.nonce) || payload.nonce < 0) return "invalid_nonce";
+  if (typeof payload.amount !== "number" || !Number.isFinite(payload.amount) || payload.amount <= 0) return "invalid_amount";
+  if (typeof payload.target !== "number" || !Number.isFinite(payload.target) || payload.target < 1 || payload.target > 99) {
+    return "invalid_target";
+  }
+  return null;
+}
+
+function validateReleasePayload(payload) {
+  if (!payload || typeof payload !== "object") return "invalid_payload";
+  if (typeof payload.amount !== "number" || !Number.isFinite(payload.amount) || payload.amount <= 0) return "invalid_amount";
+  return null;
+}
+
+function isUuid(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
 app.get("/health", (_req, res) => {
   res.json({
     status: "ok",
@@ -141,7 +198,14 @@ app.get("/health", (_req, res) => {
   });
 });
 
+app.use("/v1", apiKeyAuth(config.backendApiKey), rateLimitMiddleware(config.rateLimitWindowMs, config.rateLimitMaxRequests));
+
 app.post("/v1/bets", async (req, res) => {
+  const validationError = validateBetPayload(req.body);
+  if (validationError) {
+    return res.status(400).json({ error: validationError });
+  }
+
   const betId = uuidv4();
   const createdAt = new Date().toISOString();
   const requestPayload = { ...req.body };
@@ -196,6 +260,11 @@ app.post("/v1/bets", async (req, res) => {
 });
 
 app.post("/v1/exposure/release", async (req, res) => {
+  const validationError = validateReleasePayload(req.body);
+  if (validationError) {
+    return res.status(400).json({ error: validationError });
+  }
+
   try {
     const response = await axios.post(`${config.riskEngineUrl}/v1/release`, req.body, { timeout: 2000 });
     return res.status(200).json(response.data);
@@ -207,6 +276,9 @@ app.post("/v1/exposure/release", async (req, res) => {
 
 app.get("/v1/bets/:betId", async (req, res) => {
   const { betId } = req.params;
+  if (!isUuid(betId)) {
+    return res.status(400).json({ error: "invalid_bet_id" });
+  }
 
   try {
     const cached = await redisClient.get(`bet:${betId}`);
@@ -236,8 +308,12 @@ app.get("/v1/bets/:betId", async (req, res) => {
 });
 
 app.get("/v1/bets", async (req, res) => {
-  const parsed = Number(req.query.limit ?? 20);
-  const limit = Number.isInteger(parsed) && parsed > 0 && parsed <= 100 ? parsed : 20;
+  const rawLimit = req.query.limit;
+  const parsed = rawLimit === undefined ? 20 : Number(rawLimit);
+  if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 100) {
+    return res.status(400).json({ error: "invalid_limit" });
+  }
+  const limit = parsed;
 
   try {
     const query = await pgPool.query(
