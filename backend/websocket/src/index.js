@@ -14,18 +14,64 @@ const config = {
 };
 
 const wss = new WebSocket.Server({ server });
+let rabbitConnection;
+let rabbitChannel;
+let consumerTag;
+const metrics = {
+  messagesConsumed: 0,
+  broadcasts: 0,
+  deliveredFrames: 0,
+  invalidPayloads: 0,
+  nacks: 0,
+  lastMessageAt: null
+};
 
 function broadcast(data) {
   const message = JSON.stringify(data);
+  let delivered = 0;
   for (const client of wss.clients) {
     if (client.readyState === WebSocket.OPEN) {
       client.send(message);
+      delivered += 1;
     }
   }
+  metrics.broadcasts += 1;
+  metrics.deliveredFrames += delivered;
+  return delivered;
 }
 
-app.get("/health", (_req, res) => {
-  res.json({ status: "ok", service: "websocket", clients: wss.clients.size });
+app.get("/health", async (_req, res) => {
+  let queue = null;
+  if (rabbitChannel) {
+    try {
+      const info = await rabbitChannel.checkQueue(config.queueName);
+      queue = {
+        name: info.queue,
+        messages: info.messageCount,
+        consumers: info.consumerCount
+      };
+    } catch (error) {
+      queue = {
+        name: config.queueName,
+        error: error.message
+      };
+    }
+  }
+
+  res.json({
+    status: "ok",
+    service: "websocket",
+    clients: wss.clients.size,
+    infra: {
+      rabbitmq: Boolean(rabbitConnection),
+      consumerActive: Boolean(consumerTag)
+    },
+    stream: {
+      exchange: config.eventsExchange,
+      queue
+    },
+    metrics
+  });
 });
 
 async function consumeEventsWithRetry() {
@@ -36,21 +82,31 @@ async function consumeEventsWithRetry() {
       await channel.assertExchange(config.eventsExchange, "topic", { durable: true });
       await channel.assertQueue(config.queueName, { durable: true });
       await channel.bindQueue(config.queueName, config.eventsExchange, "bet.*");
+      rabbitConnection = conn;
+      rabbitChannel = channel;
 
       console.log("websocket connected to RabbitMQ");
-      channel.consume(config.queueName, (message) => {
+      const consumeResponse = await channel.consume(config.queueName, (message) => {
         if (!message) return;
         try {
           const event = JSON.parse(message.content.toString("utf-8"));
+          metrics.messagesConsumed += 1;
+          metrics.lastMessageAt = new Date().toISOString();
           broadcast({ routingKey: message.fields.routingKey, event });
           channel.ack(message);
         } catch (err) {
+          metrics.invalidPayloads += 1;
+          metrics.nacks += 1;
           console.error("invalid event payload", err);
           channel.nack(message, false, false);
         }
       });
+      consumerTag = consumeResponse.consumerTag;
       return;
     } catch (error) {
+      rabbitConnection = undefined;
+      rabbitChannel = undefined;
+      consumerTag = undefined;
       console.error("websocket rabbit connection failed; retrying in 2s", error.message);
       await new Promise((resolve) => setTimeout(resolve, 2000));
     }

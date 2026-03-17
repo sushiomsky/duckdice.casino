@@ -27,6 +27,7 @@ This split allows horizontal scaling for latency-sensitive paths (`dice-engine`)
 - `api-gateway` persists rotated key state in Redis (`auth:keys`) to survive service restarts.
 - Health endpoints expose non-secret readiness diagnostics for infra connectivity and internal-auth hardening (signature enforcement, replay window, Redis readiness).
 - `api-gateway` exposes `GET /v1/admin/stats` for dashboard-ready operational telemetry (rate-limit saturation, admin/bet activity, and internal call latency/error rollups over lookback windows).
+- `websocket` exposes `/health` diagnostics for RabbitMQ consumer activity, queue depth, and broadcast counters.
 - Additional REST support:
   - `GET /v1/bets/:betId` resolves from Redis first, then PostgreSQL.
   - `GET /v1/bets?limit=20` returns recent persisted bets.
