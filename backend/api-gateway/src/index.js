@@ -20,6 +20,10 @@ function getSecret(envName, fallback) {
 
 const internalApiToken = getSecret("INTERNAL_API_TOKEN", "duckdice-internal-token");
 const internalRequestSigningKey = getSecret("INTERNAL_REQUEST_SIGNING_KEY", internalApiToken);
+const internalCallTimeoutMs = Number(process.env.INTERNAL_CALL_TIMEOUT_MS || 2000);
+const internalCallTimeoutWarningMs = Number(
+  process.env.INTERNAL_CALL_TIMEOUT_WARNING_MS || Math.floor(internalCallTimeoutMs * 0.8)
+);
 
 const config = {
   port: Number(process.env.PORT || 4000),
@@ -38,7 +42,9 @@ const config = {
   cacheTtlSec: Number(process.env.BET_CACHE_TTL_SEC || 300),
   metricsRetentionMinutes: Number(process.env.METRICS_RETENTION_MINUTES || 2880),
   rateDiagnosticsScanLimit: Number(process.env.RATE_DIAGNOSTICS_SCAN_LIMIT || 1000),
-  rateDiagnosticsMaxScanIterations: Number(process.env.RATE_DIAGNOSTICS_MAX_SCAN_ITERATIONS || 20)
+  rateDiagnosticsMaxScanIterations: Number(process.env.RATE_DIAGNOSTICS_MAX_SCAN_ITERATIONS || 20),
+  internalCallTimeoutMs,
+  internalCallTimeoutWarningMs
 };
 
 const authState = {
@@ -48,6 +54,7 @@ const authState = {
 const AUTH_STATE_KEY = "auth:keys";
 const METRIC_PREFIX = "metrics";
 const LATENCY_BUCKETS_MS = [5, 10, 25, 50, 100, 250, 500, 1000, 2000, 5000];
+const TIMEOUT_ERROR_LABELS = new Set(["econnaborted", "etimedout", "timeout"]);
 const ENDPOINT_METRIC_LABELS = {
   post_bets: "POST /v1/bets",
   post_exposure_release: "POST /v1/exposure/release",
@@ -501,6 +508,9 @@ async function recordInternalCallMetrics(name, startedAtMs, success, errorType) 
       incrementMetric(`internal_call:${name}:latency_bucket:${bucketLabel}`),
       success ? Promise.resolve() : incrementMetric(`internal_call:${name}:error`)
     ];
+    if (elapsedMs >= config.internalCallTimeoutWarningMs) {
+      actions.push(incrementMetric(`internal_call:${name}:near_timeout`));
+    }
 
     if (!success && errorTypeKey) {
       actions.push(incrementMetric(errorTypeKey));
@@ -564,12 +574,19 @@ async function recordEndpointRequestMetrics(metricKey, statusCode) {
   }
 }
 
-async function readInternalCallTelemetry(name, lookbackMinutes) {
-  const [calls, errors, latencyMsSum, errorByType, ...bucketValues] = await Promise.all([
+function countTimeoutErrors(errorByType) {
+  return Object.entries(errorByType)
+    .filter(([type]) => TIMEOUT_ERROR_LABELS.has(type))
+    .reduce((sum, [, count]) => sum + count, 0);
+}
+
+async function readInternalCallTelemetry(name, lookbackMinutes, includeTimeoutDiagnostics = false) {
+  const [calls, errors, latencyMsSum, errorByType, nearTimeoutCalls, ...bucketValues] = await Promise.all([
     sumMetric(`internal_call:${name}:count`, lookbackMinutes),
     sumMetric(`internal_call:${name}:error`, lookbackMinutes),
     sumMetric(`internal_call:${name}:latency_ms_sum`, lookbackMinutes),
     readInternalCallErrorBreakdown(name, lookbackMinutes),
+    sumMetric(`internal_call:${name}:near_timeout`, lookbackMinutes),
     ...LATENCY_BUCKETS_MS.map((bound) => sumMetric(`internal_call:${name}:latency_bucket:le_${bound}`, lookbackMinutes)),
     sumMetric(`internal_call:${name}:latency_bucket:gt_5000`, lookbackMinutes)
   ]);
@@ -582,6 +599,17 @@ async function readInternalCallTelemetry(name, lookbackMinutes) {
 
   const avgLatencyMs = calls > 0 ? Number((latencyMsSum / calls).toFixed(2)) : 0;
   const errorRate = calls > 0 ? Number((errors / calls).toFixed(4)) : 0;
+  const timeoutErrors = countTimeoutErrors(errorByType);
+  const timeoutBudget = includeTimeoutDiagnostics
+    ? {
+      budgetMs: config.internalCallTimeoutMs,
+      warningThresholdMs: config.internalCallTimeoutWarningMs,
+      nearTimeoutCalls,
+      nearTimeoutRate: calls > 0 ? Number((nearTimeoutCalls / calls).toFixed(4)) : 0,
+      timeoutErrors,
+      timeoutErrorRate: calls > 0 ? Number((timeoutErrors / calls).toFixed(4)) : 0
+    }
+    : undefined;
 
   return {
     calls,
@@ -592,7 +620,8 @@ async function readInternalCallTelemetry(name, lookbackMinutes) {
     errorByType,
     p50LatencyMs: latencyPercentileFromBuckets(buckets, 0.5),
     p95LatencyMs: latencyPercentileFromBuckets(buckets, 0.95),
-    latencyBuckets: buckets
+    latencyBuckets: buckets,
+    timeoutBudget
   };
 }
 
@@ -705,7 +734,7 @@ function internalRequestConfig({ method, path, payload }) {
   const timestamp = Date.now().toString();
   const requestId = uuidv4();
   return {
-    timeout: 2000,
+    timeout: config.internalCallTimeoutMs,
     headers: {
       "x-internal-token": config.internalApiToken,
       "x-internal-timestamp": timestamp,
@@ -1008,6 +1037,7 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
   const rawLookbackMinutes = req.query.lookbackMinutes;
   const rawIncludeRateLimitDetails = req.query.includeRateLimitDetails;
   const rawComparePreviousWindow = req.query.comparePreviousWindow;
+  const rawIncludeTimeoutDiagnostics = req.query.includeTimeoutDiagnostics;
   const rawTopN = req.query.topN;
   const rawFields = req.query.fields;
   const lookbackMinutes = rawLookbackMinutes === undefined ? 60 : Number(rawLookbackMinutes);
@@ -1032,6 +1062,16 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
       comparePreviousWindow = false;
     } else {
       return res.status(400).json({ error: "invalid_compare_previous_window" });
+    }
+  }
+  let includeTimeoutDiagnostics = false;
+  if (rawIncludeTimeoutDiagnostics !== undefined) {
+    if (rawIncludeTimeoutDiagnostics === "true" || rawIncludeTimeoutDiagnostics === "1") {
+      includeTimeoutDiagnostics = true;
+    } else if (rawIncludeTimeoutDiagnostics === "false" || rawIncludeTimeoutDiagnostics === "0") {
+      includeTimeoutDiagnostics = false;
+    } else {
+      return res.status(400).json({ error: "invalid_include_timeout_diagnostics" });
     }
   }
   const topN = rawTopN === undefined ? 10 : Number(rawTopN);
@@ -1141,9 +1181,9 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
         `,
         [since]
       ),
-      readInternalCallTelemetry("dice_settle", lookbackMinutes),
-      readInternalCallTelemetry("risk_evaluate", lookbackMinutes),
-      readInternalCallTelemetry("risk_release", lookbackMinutes),
+      readInternalCallTelemetry("dice_settle", lookbackMinutes, includeTimeoutDiagnostics),
+      readInternalCallTelemetry("risk_evaluate", lookbackMinutes, includeTimeoutDiagnostics),
+      readInternalCallTelemetry("risk_release", lookbackMinutes, includeTimeoutDiagnostics),
       readEndpointRequestTelemetry(lookbackMinutes),
       comparePreviousWindow
         ? readEndpointRequestTelemetry(lookbackMinutes, nowMs - lookbackMinutes * 60_000)
