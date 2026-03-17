@@ -336,6 +336,61 @@ function buildStatsAlerts({ lookbackMinutes, rateLimitExceeded, failedByReason, 
   return alerts;
 }
 
+function buildStatsSummary({ lookbackMinutes, alerts, betByStatus, requestVolumes, internalCalls, eventsPublished }) {
+  const accepted = betByStatus.accepted || 0;
+  const rejected = betByStatus.rejected || 0;
+  const errored = betByStatus.error || 0;
+  const totalBets = Object.values(betByStatus).reduce((sum, count) => sum + count, 0);
+
+  const internalCallEntries = Object.entries(internalCalls);
+  const internalTotalCalls = internalCallEntries.reduce((sum, [, metrics]) => sum + metrics.calls, 0);
+  const internalTotalErrors = internalCallEntries.reduce((sum, [, metrics]) => sum + metrics.errors, 0);
+  const internalTimeoutErrors = internalCallEntries.reduce(
+    (sum, [, metrics]) => sum + countTimeoutErrors(metrics.errorByType || {}),
+    0
+  );
+  const noisiestInternalCall = internalCallEntries
+    .map(([name, metrics]) => ({
+      name,
+      errorRate: metrics.errorRate,
+      calls: metrics.calls,
+      errors: metrics.errors
+    }))
+    .sort((a, b) => b.errorRate - a.errorRate)[0] || null;
+
+  const warningAlerts = alerts.filter((alert) => alert.level === "warning");
+  const totalEvents = eventsPublished.total || 0;
+
+  return {
+    health: warningAlerts.length > 0 ? "warning" : "ok",
+    alertCodes: alerts.map((alert) => alert.code),
+    lookbackMinutes,
+    requests: {
+      total: requestVolumes.total,
+      ratePerMinute: perMinuteRate(requestVolumes.total, lookbackMinutes)
+    },
+    bets: {
+      total: totalBets,
+      accepted,
+      rejected,
+      error: errored,
+      acceptanceRate: totalBets > 0 ? Number((accepted / totalBets).toFixed(4)) : null
+    },
+    events: {
+      totalPublished: totalEvents,
+      ratePerMinute: perMinuteRate(totalEvents, lookbackMinutes)
+    },
+    internalCalls: {
+      total: internalTotalCalls,
+      errors: internalTotalErrors,
+      errorRate: internalTotalCalls > 0 ? Number((internalTotalErrors / internalTotalCalls).toFixed(4)) : 0,
+      timeoutErrors: internalTimeoutErrors,
+      timeoutErrorRate: internalTotalCalls > 0 ? Number((internalTimeoutErrors / internalTotalCalls).toFixed(4)) : 0,
+      noisiestEndpoint: noisiestInternalCall
+    }
+  };
+}
+
 function parseRateLimitKey(key) {
   if (!key.startsWith("rate:")) {
     return null;
@@ -1078,7 +1133,7 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
   if (!Number.isInteger(topN) || topN <= 0 || topN > 50) {
     return res.status(400).json({ error: "invalid_top_n" });
   }
-  const allowedFields = new Set(["rateLimit", "adminActions", "internalCalls", "bets", "events", "alerts", "comparison", "requestVolumes"]);
+  const allowedFields = new Set(["rateLimit", "adminActions", "internalCalls", "bets", "events", "alerts", "comparison", "requestVolumes", "summary"]);
   let fieldsFilter = null;
   if (rawFields !== undefined) {
     const requested = String(rawFields)
@@ -1233,6 +1288,14 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
       internalCalls,
       eventsPublished
     });
+    const summary = buildStatsSummary({
+      lookbackMinutes,
+      alerts,
+      betByStatus,
+      requestVolumes,
+      internalCalls,
+      eventsPublished
+    });
     const comparison = comparePreviousWindow
       ? (() => {
         const previousBetByStatus = Object.fromEntries(
@@ -1302,6 +1365,7 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
         }
       },
       alerts,
+      summary,
       comparison
     };
     if (!fieldsFilter) {
