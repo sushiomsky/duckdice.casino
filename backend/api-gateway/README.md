@@ -14,6 +14,7 @@ Public backend gateway that orchestrates bet settlement with:
 - Redis-backed rate limiting is applied to `/v1/*` requests using `ip + api key` buckets.
 - Gateway-to-engine calls include `x-internal-token` plus signed headers (`x-internal-timestamp`, `x-internal-request-id`, `x-internal-signature`) using `INTERNAL_REQUEST_SIGNING_KEY`.
 - Internal request IDs are unique per call (UUIDv4) and are deduplicated by internal services using Redis `NX` windows to block short-window replay.
+- Internal services emit structured `internal_auth_denied` logs for rejected internal requests.
 - Sensitive tokens support file-based loading via `BACKEND_API_KEY_FILE`, `ADMIN_API_KEY_FILE`, `INTERNAL_API_TOKEN_FILE`, and `INTERNAL_REQUEST_SIGNING_KEY_FILE`.
 - Admin actions are written to PostgreSQL `admin_actions` with hashed actor key fingerprints.
 - Runtime key state is persisted in Redis (`auth:keys`) so rotations survive gateway restarts.

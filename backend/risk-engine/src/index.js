@@ -57,6 +57,17 @@ function isUuid(value) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
 
+function logInternalAuthFailure(req, reason) {
+  console.warn("internal_auth_denied", JSON.stringify({
+    service: "risk-engine",
+    reason,
+    method: req.method,
+    path: req.originalUrl.split("?")[0],
+    remoteIp: req.ip,
+    timestamp: new Date().toISOString()
+  }));
+}
+
 async function connectRedisWithRetry() {
   while (!redisClient) {
     try {
@@ -88,14 +99,17 @@ async function internalAuth(req, res, next) {
     const requestId = req.header("x-internal-request-id");
     const signature = req.header("x-internal-signature");
     if (!token || token !== config.internalApiToken || !timestamp || !requestId || !signature || !isUuid(requestId)) {
+      logInternalAuthFailure(req, "missing_or_invalid_headers");
       return res.status(401).json({ error: "unauthorized" });
     }
 
     const timestampMs = Number(timestamp);
     if (!Number.isInteger(timestampMs)) {
+      logInternalAuthFailure(req, "invalid_timestamp");
       return res.status(401).json({ error: "unauthorized" });
     }
     if (Math.abs(Date.now() - timestampMs) > config.internalAuthMaxSkewMs) {
+      logInternalAuthFailure(req, "timestamp_skew");
       return res.status(401).json({ error: "unauthorized" });
     }
 
@@ -107,16 +121,19 @@ async function internalAuth(req, res, next) {
       payload: req.body
     });
     if (!signaturesMatch(signature, expectedSignature)) {
+      logInternalAuthFailure(req, "signature_mismatch");
       return res.status(401).json({ error: "unauthorized" });
     }
 
     const accepted = await consumeInternalRequest(requestId);
     if (!accepted) {
+      logInternalAuthFailure(req, "request_replay");
       return res.status(401).json({ error: "unauthorized" });
     }
 
     return next();
   } catch (error) {
+    logInternalAuthFailure(req, "auth_backend_unavailable");
     console.error("risk-engine internal auth unavailable", error.message);
     return res.status(503).json({ error: "internal_auth_unavailable" });
   }
