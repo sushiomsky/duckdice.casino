@@ -1,6 +1,7 @@
 const express = require("express");
 const axios = require("axios");
 const amqplib = require("amqplib");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const { Pool } = require("pg");
 const { createClient } = require("redis");
@@ -75,6 +76,16 @@ async function connectPostgresWithRetry() {
         );
       `);
       await pool.query("CREATE INDEX IF NOT EXISTS bets_created_at_idx ON bets (created_at DESC)");
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS admin_actions (
+          action_id UUID PRIMARY KEY,
+          created_at TIMESTAMPTZ NOT NULL,
+          actor_key_hash TEXT NOT NULL,
+          action TEXT NOT NULL,
+          details JSONB NOT NULL
+        );
+      `);
+      await pool.query("CREATE INDEX IF NOT EXISTS admin_actions_created_at_idx ON admin_actions (created_at DESC)");
       pgPool = pool;
       console.log("api-gateway connected to PostgreSQL");
     } catch (err) {
@@ -126,6 +137,16 @@ function dbRowToBet(row) {
   };
 }
 
+function adminRowToAction(row) {
+  return {
+    actionId: row.action_id,
+    createdAt: row.created_at,
+    actorKeyHash: row.actor_key_hash,
+    action: row.action,
+    details: row.details
+  };
+}
+
 async function persistBet(record) {
   await pgPool.query(
     `
@@ -146,6 +167,20 @@ async function persistBet(record) {
 
 async function cacheBet(record) {
   await redisClient.set(`bet:${record.betId}`, JSON.stringify(record), { EX: config.cacheTtlSec });
+}
+
+function hashApiKey(value) {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+async function recordAdminAction(action, actorApiKey, details) {
+  await pgPool.query(
+    `
+      INSERT INTO admin_actions (action_id, created_at, actor_key_hash, action, details)
+      VALUES ($1, $2, $3, $4, $5::jsonb)
+    `,
+    [uuidv4(), new Date().toISOString(), hashApiKey(actorApiKey), action, JSON.stringify(details)]
+  );
 }
 
 function internalRequestConfig() {
@@ -171,6 +206,11 @@ function requireApiKey(scope) {
       return res.status(401).json({ error: "unauthorized" });
     }
 
+    req.auth = {
+      isAdmin,
+      isBackend,
+      apiKey
+    };
     return next();
   };
 }
@@ -237,7 +277,7 @@ app.get("/health", (_req, res) => {
 
 app.use("/v1", requireApiKey("backend"), rateLimitMiddleware(config.rateLimitWindowMs, config.rateLimitMaxRequests));
 
-app.post("/v1/admin/keys/rotate", requireApiKey("admin"), (req, res) => {
+app.post("/v1/admin/keys/rotate", requireApiKey("admin"), async (req, res) => {
   const { target, newKey } = req.body;
   if (target !== "backend" && target !== "admin") {
     return res.status(400).json({ error: "invalid_target" });
@@ -247,10 +287,21 @@ app.post("/v1/admin/keys/rotate", requireApiKey("admin"), (req, res) => {
   }
 
   const value = newKey.trim();
+  const previousHash = target === "backend" ? hashApiKey(authState.backendApiKey) : hashApiKey(authState.adminApiKey);
   if (target === "backend") {
     authState.backendApiKey = value;
   } else {
     authState.adminApiKey = value;
+  }
+
+  try {
+    await recordAdminAction("key_rotate", req.auth.apiKey, {
+      target,
+      previousHash,
+      newHash: hashApiKey(value)
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "audit_log_failed", detail: toDetail(error) });
   }
 
   return res.status(200).json({ rotated: target, updatedAt: new Date().toISOString() });
@@ -335,10 +386,38 @@ app.post("/v1/exposure/release", requireApiKey("admin"), async (req, res) => {
       req.body,
       internalRequestConfig()
     );
+    try {
+      await recordAdminAction("exposure_release", req.auth.apiKey, { amount: req.body.amount });
+    } catch (error) {
+      return res.status(500).json({ error: "audit_log_failed", detail: toDetail(error) });
+    }
     return res.status(200).json(response.data);
   } catch (error) {
     const detail = error.response?.data || { message: error.message };
     return res.status(400).json({ error: "release_failed", detail });
+  }
+});
+
+app.get("/v1/admin/actions", requireApiKey("admin"), async (req, res) => {
+  const rawLimit = req.query.limit;
+  const parsed = rawLimit === undefined ? 20 : Number(rawLimit);
+  if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 100) {
+    return res.status(400).json({ error: "invalid_limit" });
+  }
+
+  try {
+    const query = await pgPool.query(
+      `
+        SELECT action_id, created_at, actor_key_hash, action, details
+        FROM admin_actions
+        ORDER BY created_at DESC
+        LIMIT $1
+      `,
+      [parsed]
+    );
+    return res.status(200).json({ actions: query.rows.map(adminRowToAction) });
+  } catch (error) {
+    return res.status(500).json({ error: "admin_actions_failed", detail: toDetail(error) });
   }
 });
 

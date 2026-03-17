@@ -14,6 +14,7 @@ Public backend gateway that orchestrates bet settlement with:
 - Redis-backed rate limiting is applied to `/v1/*` requests using `ip + api key` buckets.
 - Gateway-to-engine calls include `x-internal-token` and require matching `INTERNAL_API_TOKEN` on internal services.
 - Sensitive tokens support file-based loading via `BACKEND_API_KEY_FILE`, `ADMIN_API_KEY_FILE`, and `INTERNAL_API_TOKEN_FILE`.
+- Admin actions are written to PostgreSQL `admin_actions` with hashed actor key fingerprints.
 
 ## Endpoints
 - `POST /v1/bets`
@@ -21,3 +22,4 @@ Public backend gateway that orchestrates bet settlement with:
 - `GET /v1/bets/:betId`
 - `GET /v1/bets?limit=20`
 - `POST /v1/admin/keys/rotate`
+- `GET /v1/admin/actions?limit=20`
