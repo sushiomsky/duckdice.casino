@@ -231,6 +231,42 @@ function parseRateLimitKey(key) {
   };
 }
 
+function normalizeErrorTypeLabel(rawLabel) {
+  if (typeof rawLabel !== "string" || rawLabel.trim() === "") {
+    return "unknown";
+  }
+
+  const normalized = rawLabel.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  if (!normalized) {
+    return "unknown";
+  }
+
+  return normalized.slice(0, 48);
+}
+
+function classifyInternalCallError(error) {
+  const direct = error?.response?.data?.error;
+  if (typeof direct === "string" && direct.trim() !== "") {
+    return normalizeErrorTypeLabel(direct);
+  }
+
+  const detailReason = error?.response?.data?.detail?.reason;
+  if (typeof detailReason === "string" && detailReason.trim() !== "") {
+    return normalizeErrorTypeLabel(detailReason);
+  }
+
+  const detailError = error?.response?.data?.detail?.error;
+  if (typeof detailError === "string" && detailError.trim() !== "") {
+    return normalizeErrorTypeLabel(detailError);
+  }
+
+  if (typeof error?.code === "string" && error.code.trim() !== "") {
+    return normalizeErrorTypeLabel(error.code);
+  }
+
+  return normalizeErrorTypeLabel(error?.message);
+}
+
 function latencyPercentileFromBuckets(buckets, percentile) {
   const total = Object.values(buckets).reduce((sum, count) => sum + count, 0);
   if (total === 0) {
@@ -336,16 +372,26 @@ async function recordAdminAction(action, actorApiKey, details) {
   }
 }
 
-async function recordInternalCallMetrics(name, startedAtMs, success) {
+async function recordInternalCallMetrics(name, startedAtMs, success, errorType) {
   const elapsedMs = Math.max(0, Date.now() - startedAtMs);
   const bucketLabel = latencyBucketLabel(elapsedMs);
+  const errorTypeKey = errorType ? `internal_call:${name}:error_type:${errorType}` : null;
+  const errorTypeIndexKey = `metric_index:internal_call:${name}:error_types`;
   try {
-    await Promise.all([
+    const actions = [
       incrementMetric(`internal_call:${name}:count`),
       incrementMetricBy(`internal_call:${name}:latency_ms_sum`, elapsedMs),
       incrementMetric(`internal_call:${name}:latency_bucket:${bucketLabel}`),
       success ? Promise.resolve() : incrementMetric(`internal_call:${name}:error`)
-    ]);
+    ];
+
+    if (!success && errorTypeKey) {
+      actions.push(incrementMetric(errorTypeKey));
+      actions.push(redisClient.sAdd(errorTypeIndexKey, errorType));
+      actions.push(redisClient.expire(errorTypeIndexKey, config.metricsRetentionMinutes * 60));
+    }
+
+    await Promise.all(actions);
   } catch (error) {
     console.error("internal call metric increment failed", error.message);
   }
@@ -363,19 +409,39 @@ async function postInternalService(name, url, payload, path) {
         payload
       })
     );
-    await recordInternalCallMetrics(name, startedAtMs, true);
+    await recordInternalCallMetrics(name, startedAtMs, true, null);
     return response;
   } catch (error) {
-    await recordInternalCallMetrics(name, startedAtMs, false);
+    await recordInternalCallMetrics(name, startedAtMs, false, classifyInternalCallError(error));
     throw error;
   }
 }
 
+async function readInternalCallErrorBreakdown(name, lookbackMinutes, topN = 5) {
+  const indexKey = `metric_index:internal_call:${name}:error_types`;
+  const labels = await redisClient.sMembers(indexKey);
+  if (!labels || labels.length === 0) {
+    return {};
+  }
+
+  const counts = await Promise.all(
+    labels.map((label) => sumMetric(`internal_call:${name}:error_type:${label}`, lookbackMinutes))
+  );
+  return Object.fromEntries(
+    labels
+      .map((label, index) => [label, counts[index]])
+      .filter(([, count]) => count > 0)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, topN)
+  );
+}
+
 async function readInternalCallTelemetry(name, lookbackMinutes) {
-  const [calls, errors, latencyMsSum, ...bucketValues] = await Promise.all([
+  const [calls, errors, latencyMsSum, errorByType, ...bucketValues] = await Promise.all([
     sumMetric(`internal_call:${name}:count`, lookbackMinutes),
     sumMetric(`internal_call:${name}:error`, lookbackMinutes),
     sumMetric(`internal_call:${name}:latency_ms_sum`, lookbackMinutes),
+    readInternalCallErrorBreakdown(name, lookbackMinutes),
     ...LATENCY_BUCKETS_MS.map((bound) => sumMetric(`internal_call:${name}:latency_bucket:le_${bound}`, lookbackMinutes)),
     sumMetric(`internal_call:${name}:latency_bucket:gt_5000`, lookbackMinutes)
   ]);
@@ -395,6 +461,7 @@ async function readInternalCallTelemetry(name, lookbackMinutes) {
     errorRate,
     avgLatencyMs,
     latencySampleCount,
+    errorByType,
     p50LatencyMs: latencyPercentileFromBuckets(buckets, 0.5),
     p95LatencyMs: latencyPercentileFromBuckets(buckets, 0.95),
     latencyBuckets: buckets
