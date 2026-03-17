@@ -7,13 +7,18 @@ export interface BetRequest {
   clientSeed: string;
   nonce: number;
   amount: number;
-  target: number;
+  chance?: number;
+  target?: number;
+  rollOver?: boolean;
+  houseEdgeBps?: number;
 }
 
 export interface RollRecord {
   id: number;
   timestamp: string;
   amount: number;
+  chance: number;
+  rollOver: boolean;
   target: number;
   roll: number;
   won: boolean;
@@ -45,7 +50,7 @@ interface ApiStats {
 function createDefaultState(): ApiState {
   return {
     exposure: 0,
-    risk: { bankroll: 10_000, maxExposure: 3_000, maxPayoutPercent: 0.05 },
+    risk: { bankroll: 10_000, riskFactor: 0.05, maxExposure: 3_000, maxPayout: 500 },
     apiKey: process.env.API_KEY ?? "duckdice-dev-key",
     rateLimit: {
       windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS ?? 60_000),
@@ -127,10 +132,24 @@ export function createApp(partialState?: Partial<ApiState>) {
   app.use(apiKeyAuth(state.apiKey));
 
   app.post("/bet", (req, res) => {
-    const { serverSeed, clientSeed, nonce, amount, target } = req.body as BetRequest;
+    const { serverSeed, clientSeed, nonce, amount, chance: rawChance, target, rollOver, houseEdgeBps } = req.body as BetRequest;
     try {
-      const preview = settleBet({ serverSeed, clientSeed, nonce, amount, target, houseEdgeBps });
-      const multiplier = getMultiplier(target, houseEdgeBps);
+      const chance = rawChance ?? target;
+      if (chance === undefined) {
+        throw new Error("chance is required");
+      }
+      const normalizedRollOver = rollOver ?? false;
+      const edgeBps = houseEdgeBps ?? 100;
+      const preview = settleBet({
+        serverSeed,
+        clientSeed,
+        nonce,
+        amount,
+        chance,
+        rollOver: normalizedRollOver,
+        houseEdgeBps: edgeBps,
+      });
+      const multiplier = (100 / chance) * (1 - edgeBps / 10_000);
       const risk = evaluateBet(state.risk, {
         betAmount: amount,
         multiplier,
@@ -144,7 +163,9 @@ export function createApp(partialState?: Partial<ApiState>) {
         id: state.rolls.length + 1,
         timestamp: new Date().toISOString(),
         amount,
-        target,
+        chance,
+        rollOver: normalizedRollOver,
+        target: chance,
         ...preview,
       };
 
@@ -161,12 +182,14 @@ export function createApp(partialState?: Partial<ApiState>) {
 
   app.get("/bankroll", (_req, res) => {
     const available = Number((state.risk.bankroll - state.exposure).toFixed(8));
+    const riskFactor = state.risk.riskFactor ?? 0.005;
+    const maxPayout = state.risk.maxPayout ?? state.risk.bankroll * riskFactor;
     return res.json({
       bankroll: state.risk.bankroll,
       exposure: Number(state.exposure.toFixed(8)),
       available,
       maxExposure: state.risk.maxExposure,
-      maxPayoutPercent: state.risk.maxPayoutPercent,
+      maxPayout: Number(maxPayout.toFixed(8)),
     });
   });
 

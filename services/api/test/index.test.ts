@@ -9,7 +9,7 @@ describe("api", () => {
     apiKey,
     rateLimit: { windowMs: 10_000, maxRequests: 20 },
     rolls: [],
-    risk: { bankroll: 1000, maxExposure: 100, maxPayoutPercent: 0.2 },
+    risk: { bankroll: 1000, riskFactor: 0.05, maxExposure: 100, maxPayout: 200 },
   });
 
   it("returns health", async () => {
@@ -60,7 +60,7 @@ describe("api", () => {
       exposure: 0,
       apiKey,
       rolls: [],
-      risk: { bankroll: 1000, maxExposure: 100, maxPayoutPercent: 0.2 },
+      risk: { bankroll: 1000, riskFactor: 0.05, maxExposure: 100, maxPayout: 200 },
       rateLimit: { windowMs: 60_000, maxRequests: 1 },
     });
 
