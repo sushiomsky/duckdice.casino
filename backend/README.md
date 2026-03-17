@@ -14,3 +14,10 @@
 5. `websocket` consumes `bet.*` events and broadcasts them to browser/mobile clients.
 
 This split allows horizontal scaling for latency-sensitive paths (`dice-engine`) and independent scaling for stateful workloads (`risk-engine`, websocket fan-out).
+
+## Data Layer
+- `api-gateway` persists each processed bet to PostgreSQL (`bets` table).
+- `api-gateway` caches bet lookups in Redis for fast read-through access.
+- Additional REST support:
+  - `GET /v1/bets/:betId` resolves from Redis first, then PostgreSQL.
+  - `GET /v1/bets?limit=20` returns recent persisted bets.

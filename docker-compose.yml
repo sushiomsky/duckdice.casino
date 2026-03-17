@@ -1,4 +1,20 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_DB=duckdice
+      - POSTGRES_USER=duckdice
+      - POSTGRES_PASSWORD=duckdice
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
   rabbitmq:
     image: rabbitmq:3.13-management
     ports:
@@ -31,12 +47,17 @@ services:
       - dice-engine
       - risk-engine
       - rabbitmq
+      - postgres
+      - redis
     environment:
       - PORT=4000
       - DICE_ENGINE_URL=http://dice-engine:4001
       - RISK_ENGINE_URL=http://risk-engine:4002
       - RABBITMQ_URL=amqp://rabbitmq:5672
       - EVENTS_EXCHANGE=duckdice.events
+      - POSTGRES_URL=postgres://duckdice:duckdice@postgres:5432/duckdice
+      - REDIS_URL=redis://redis:6379
+      - BET_CACHE_TTL_SEC=300
     ports:
       - "4000:4000"
 
@@ -52,3 +73,6 @@ services:
       - WS_QUEUE_NAME=duckdice.websocket
     ports:
       - "4010:4010"
+
+volumes:
+  postgres_data:
