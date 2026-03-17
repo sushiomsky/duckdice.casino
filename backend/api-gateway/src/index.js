@@ -234,6 +234,64 @@ function mapMetricComparisons(currentMap, previousMap) {
   );
 }
 
+function buildStatsAlerts({ lookbackMinutes, rateLimitExceeded, failedByReason, internalCalls, eventsPublished }) {
+  const alerts = [];
+
+  if (rateLimitExceeded > 0) {
+    alerts.push({
+      level: "warning",
+      code: "rate_limit_exceeded_activity",
+      message: `${rateLimitExceeded} rate-limit exceedances in the last ${lookbackMinutes} minutes.`
+    });
+  }
+
+  const failedBetTotal = Object.values(failedByReason).reduce((sum, count) => sum + count, 0);
+  if (failedBetTotal > 0) {
+    const [topReason, topCount] = Object.entries(failedByReason)[0] || ["unknown", failedBetTotal];
+    alerts.push({
+      level: "warning",
+      code: "failed_bets_detected",
+      message: `${failedBetTotal} failed bets in the last ${lookbackMinutes} minutes.`,
+      details: {
+        topReason,
+        count: topCount
+      }
+    });
+  }
+
+  for (const [name, metrics] of Object.entries(internalCalls)) {
+    if (metrics.errors > 0 && metrics.errorRate >= 0.01) {
+      alerts.push({
+        level: "warning",
+        code: "internal_call_error_rate_high",
+        message: `${name} error rate is ${(metrics.errorRate * 100).toFixed(2)}% over last ${lookbackMinutes} minutes.`,
+        details: {
+          calls: metrics.calls,
+          errors: metrics.errors
+        }
+      });
+    }
+  }
+
+  if (eventsPublished.error > 0) {
+    alerts.push({
+      level: "warning",
+      code: "error_events_published",
+      message: `${eventsPublished.error} bet.error events published in the last ${lookbackMinutes} minutes.`
+    });
+  }
+
+  if (alerts.length === 0) {
+    alerts.push({
+      level: "info",
+      code: "no_alerts",
+      message: `No elevated operational signals in the last ${lookbackMinutes} minutes.`
+    });
+  }
+
+  return alerts;
+}
+
 function parseRateLimitKey(key) {
   if (!key.startsWith("rate:")) {
     return null;
@@ -1013,6 +1071,19 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
       riskRelease: riskReleaseMetrics
     };
     const totalEvents = acceptedEvents + rejectedEvents + errorEvents;
+    const eventsPublished = {
+      accepted: acceptedEvents,
+      rejected: rejectedEvents,
+      error: errorEvents,
+      total: totalEvents
+    };
+    const alerts = buildStatsAlerts({
+      lookbackMinutes,
+      rateLimitExceeded,
+      failedByReason,
+      internalCalls,
+      eventsPublished
+    });
     const comparison = comparePreviousWindow
       ? (() => {
         const previousBetByStatus = Object.fromEntries(
@@ -1065,12 +1136,7 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
         failedByReason
       },
       events: {
-        published: {
-          accepted: acceptedEvents,
-          rejected: rejectedEvents,
-          error: errorEvents,
-          total: totalEvents
-        },
+        published: eventsPublished,
         ratePerMinute: {
           accepted: perMinuteRate(acceptedEvents, lookbackMinutes),
           rejected: perMinuteRate(rejectedEvents, lookbackMinutes),
@@ -1078,6 +1144,7 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
           total: perMinuteRate(totalEvents, lookbackMinutes)
         }
       },
+      alerts,
       comparison
     });
   } catch (error) {

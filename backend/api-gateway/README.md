@@ -28,4 +28,4 @@ Public backend gateway that orchestrates bet settlement with:
 - `GET /v1/bets?limit=20`
 - `POST /v1/admin/keys/rotate`
 - `GET /v1/admin/actions?limit=20`
-- `GET /v1/admin/stats?lookbackMinutes=60&includeRateLimitDetails=true&topN=10&comparePreviousWindow=true` (admin telemetry: rate-limit saturation, optional sampled top rate-limit keys for abuse triage (`sampledKeys`, `truncated`, `top`), admin action volume, internal call latency/error rollups with p50/p95 + bucket sample counts + `errorByType`, failed-bet reason breakdowns, event publish rates, and optional current-vs-previous-window deltas)
+- `GET /v1/admin/stats?lookbackMinutes=60&includeRateLimitDetails=true&topN=10&comparePreviousWindow=true` (admin telemetry: rate-limit saturation, optional sampled top rate-limit keys for abuse triage (`sampledKeys`, `truncated`, `top`), admin action volume, internal call latency/error rollups with p50/p95 + bucket sample counts + `errorByType`, failed-bet reason breakdowns, event publish rates, optional current-vs-previous-window deltas, and `alerts` hints for rapid ops triage)
