@@ -36,7 +36,9 @@ const config = {
   postgresUrl: process.env.POSTGRES_URL || "postgres://duckdice:duckdice@postgres:5432/duckdice",
   redisUrl: process.env.REDIS_URL || "redis://redis:6379",
   cacheTtlSec: Number(process.env.BET_CACHE_TTL_SEC || 300),
-  metricsRetentionMinutes: Number(process.env.METRICS_RETENTION_MINUTES || 2880)
+  metricsRetentionMinutes: Number(process.env.METRICS_RETENTION_MINUTES || 2880),
+  rateDiagnosticsScanLimit: Number(process.env.RATE_DIAGNOSTICS_SCAN_LIMIT || 1000),
+  rateDiagnosticsMaxScanIterations: Number(process.env.RATE_DIAGNOSTICS_MAX_SCAN_ITERATIONS || 20)
 };
 
 const authState = {
@@ -210,6 +212,25 @@ function perMinuteRate(count, lookbackMinutes) {
   return Number((count / lookbackMinutes).toFixed(4));
 }
 
+function parseRateLimitKey(key) {
+  if (!key.startsWith("rate:")) {
+    return null;
+  }
+
+  const remainder = key.slice("rate:".length);
+  const splitIndex = remainder.lastIndexOf(":");
+  if (splitIndex < 0) {
+    return null;
+  }
+
+  const ip = remainder.slice(0, splitIndex) || "unknown";
+  const apiKey = remainder.slice(splitIndex + 1);
+  return {
+    ip,
+    apiKeyHashPrefix: apiKey ? hashApiKey(apiKey).slice(0, 12) : null
+  };
+}
+
 function latencyPercentileFromBuckets(buckets, percentile) {
   const total = Object.values(buckets).reduce((sum, count) => sum + count, 0);
   if (total === 0) {
@@ -377,6 +398,76 @@ async function readInternalCallTelemetry(name, lookbackMinutes) {
     p50LatencyMs: latencyPercentileFromBuckets(buckets, 0.5),
     p95LatencyMs: latencyPercentileFromBuckets(buckets, 0.95),
     latencyBuckets: buckets
+  };
+}
+
+async function readRateLimitDiagnostics(topN) {
+  let cursor = "0";
+  const keySet = new Set();
+  let scanIterations = 0;
+  do {
+    scanIterations += 1;
+    const scanResult = await redisClient.scan(cursor, {
+      MATCH: "rate:*",
+      COUNT: 100
+    });
+    cursor = scanResult.cursor;
+    for (const key of scanResult.keys) {
+      keySet.add(key);
+      if (keySet.size >= config.rateDiagnosticsScanLimit) {
+        break;
+      }
+    }
+    if (keySet.size >= config.rateDiagnosticsScanLimit) {
+      break;
+    }
+    if (scanIterations >= config.rateDiagnosticsMaxScanIterations) {
+      break;
+    }
+  } while (cursor !== "0");
+
+  const sampledKeys = Array.from(keySet).slice(0, config.rateDiagnosticsScanLimit);
+  if (sampledKeys.length === 0) {
+    return {
+      sampledKeys: 0,
+      truncated: cursor !== "0",
+      top: []
+    };
+  }
+
+  const counts = await redisClient.mGet(sampledKeys);
+  const entries = sampledKeys
+    .map((key, index) => {
+      const count = Number.parseInt(counts[index] || "0", 10);
+      if (!Number.isFinite(count) || count <= 0) {
+        return null;
+      }
+      const parsed = parseRateLimitKey(key);
+      if (!parsed) {
+        return null;
+      }
+      return {
+        redisKey: key,
+        ip: parsed.ip,
+        apiKeyHashPrefix: parsed.apiKeyHashPrefix,
+        count
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.count - a.count);
+
+  const top = entries.slice(0, topN);
+  const ttlValues = await Promise.all(top.map((entry) => redisClient.pTTL(entry.redisKey)));
+
+  return {
+    sampledKeys: sampledKeys.length,
+    truncated: cursor !== "0",
+    top: top.map((entry, index) => ({
+      ip: entry.ip,
+      apiKeyHashPrefix: entry.apiKeyHashPrefix,
+      count: entry.count,
+      ttlMs: ttlValues[index]
+    }))
   };
 }
 
@@ -678,15 +769,32 @@ app.get("/v1/admin/actions", requireApiKey("admin"), async (req, res) => {
 
 app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
   const rawLookbackMinutes = req.query.lookbackMinutes;
+  const rawIncludeRateLimitDetails = req.query.includeRateLimitDetails;
+  const rawTopN = req.query.topN;
   const lookbackMinutes = rawLookbackMinutes === undefined ? 60 : Number(rawLookbackMinutes);
   if (!Number.isInteger(lookbackMinutes) || lookbackMinutes <= 0 || lookbackMinutes > config.metricsRetentionMinutes) {
     return res.status(400).json({ error: "invalid_lookback_minutes" });
+  }
+  let includeRateLimitDetails = false;
+  if (rawIncludeRateLimitDetails !== undefined) {
+    if (rawIncludeRateLimitDetails === "true" || rawIncludeRateLimitDetails === "1") {
+      includeRateLimitDetails = true;
+    } else if (rawIncludeRateLimitDetails === "false" || rawIncludeRateLimitDetails === "0") {
+      includeRateLimitDetails = false;
+    } else {
+      return res.status(400).json({ error: "invalid_include_rate_limit_details" });
+    }
+  }
+  const topN = rawTopN === undefined ? 10 : Number(rawTopN);
+  if (!Number.isInteger(topN) || topN <= 0 || topN > 50) {
+    return res.status(400).json({ error: "invalid_top_n" });
   }
 
   const since = new Date(Date.now() - lookbackMinutes * 60_000).toISOString();
   try {
     const [
       rateLimitExceeded,
+      rateLimitDiagnostics,
       adminTotalQuery,
       adminByActionQuery,
       betByStatusQuery,
@@ -699,6 +807,7 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
       errorEvents
     ] = await Promise.all([
       sumMetric("rate_limit_exceeded", lookbackMinutes),
+      includeRateLimitDetails ? readRateLimitDiagnostics(topN) : null,
       pgPool.query("SELECT COUNT(*)::int AS count FROM admin_actions WHERE created_at >= $1", [since]),
       pgPool.query(
         `
@@ -771,7 +880,8 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
       rateLimit: {
         windowMs: config.rateLimitWindowMs,
         maxRequests: config.rateLimitMaxRequests,
-        exceeded: rateLimitExceeded
+        exceeded: rateLimitExceeded,
+        diagnostics: includeRateLimitDetails ? rateLimitDiagnostics : undefined
       },
       adminActions: {
         total: Number(adminTotalQuery.rows[0]?.count || 0),
