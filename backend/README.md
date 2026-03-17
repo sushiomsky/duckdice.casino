@@ -19,7 +19,7 @@ This split allows horizontal scaling for latency-sensitive paths (`dice-engine`)
 - `api-gateway` persists each processed bet to PostgreSQL (`bets` table).
 - `api-gateway` caches bet lookups in Redis for fast read-through access.
 - `api-gateway` protects `/v1/*` routes with scoped `x-api-key` auth (backend/admin) and Redis-backed rate limiting.
-- `dice-engine` and `risk-engine` protect `/v1/*` routes with `x-internal-token` for service-to-service access.
+- `dice-engine` and `risk-engine` protect `/v1/*` routes with `x-internal-token` plus HMAC-signed request headers and timestamp skew checks for service-to-service access.
 - Backend secrets can be injected via env vars or file-based variants (`*_FILE`) for container secret managers.
 - `api-gateway` supports runtime API key rotation through an admin-only endpoint.
 - `api-gateway` stores admin operation audit records in PostgreSQL (`admin_actions`) with hashed key fingerprints.

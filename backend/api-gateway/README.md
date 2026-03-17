@@ -12,8 +12,8 @@ Public backend gateway that orchestrates bet settlement with:
 - `/v1/*` endpoints require `x-api-key` with backend or admin scope.
 - Admin-only operations require `x-api-key` matching `ADMIN_API_KEY`.
 - Redis-backed rate limiting is applied to `/v1/*` requests using `ip + api key` buckets.
-- Gateway-to-engine calls include `x-internal-token` and require matching `INTERNAL_API_TOKEN` on internal services.
-- Sensitive tokens support file-based loading via `BACKEND_API_KEY_FILE`, `ADMIN_API_KEY_FILE`, and `INTERNAL_API_TOKEN_FILE`.
+- Gateway-to-engine calls include `x-internal-token` plus signed headers (`x-internal-timestamp`, `x-internal-signature`) using `INTERNAL_REQUEST_SIGNING_KEY`.
+- Sensitive tokens support file-based loading via `BACKEND_API_KEY_FILE`, `ADMIN_API_KEY_FILE`, `INTERNAL_API_TOKEN_FILE`, and `INTERNAL_REQUEST_SIGNING_KEY_FILE`.
 - Admin actions are written to PostgreSQL `admin_actions` with hashed actor key fingerprints.
 - Runtime key state is persisted in Redis (`auth:keys`) so rotations survive gateway restarts.
 

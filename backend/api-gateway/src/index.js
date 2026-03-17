@@ -18,11 +18,15 @@ function getSecret(envName, fallback) {
   return process.env[envName] || fallback;
 }
 
+const internalApiToken = getSecret("INTERNAL_API_TOKEN", "duckdice-internal-token");
+const internalRequestSigningKey = getSecret("INTERNAL_REQUEST_SIGNING_KEY", internalApiToken);
+
 const config = {
   port: Number(process.env.PORT || 4000),
   backendApiKey: getSecret("BACKEND_API_KEY", "duckdice-backend-key"),
   adminApiKey: getSecret("ADMIN_API_KEY", "duckdice-admin-key"),
-  internalApiToken: getSecret("INTERNAL_API_TOKEN", "duckdice-internal-token"),
+  internalApiToken,
+  internalRequestSigningKey,
   rateLimitWindowMs: Number(process.env.RATE_LIMIT_WINDOW_MS || 60_000),
   rateLimitMaxRequests: Number(process.env.RATE_LIMIT_MAX_REQUESTS || 120),
   diceEngineUrl: process.env.DICE_ENGINE_URL || "http://dice-engine:4001",
@@ -204,6 +208,20 @@ function hashApiKey(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
 
+function hashInternalPayload(payload) {
+  return crypto.createHash("sha256").update(JSON.stringify(payload ?? {})).digest("hex");
+}
+
+function signInternalRequest({ method, path, timestamp, payload }) {
+  const canonical = [
+    method.toUpperCase(),
+    path,
+    timestamp,
+    hashInternalPayload(payload)
+  ].join("\n");
+  return crypto.createHmac("sha256", config.internalRequestSigningKey).update(canonical).digest("hex");
+}
+
 async function recordAdminAction(action, actorApiKey, details) {
   await pgPool.query(
     `
@@ -214,11 +232,19 @@ async function recordAdminAction(action, actorApiKey, details) {
   );
 }
 
-function internalRequestConfig() {
+function internalRequestConfig({ method, path, payload }) {
+  const timestamp = Date.now().toString();
   return {
     timeout: 2000,
     headers: {
-      "x-internal-token": config.internalApiToken
+      "x-internal-token": config.internalApiToken,
+      "x-internal-timestamp": timestamp,
+      "x-internal-signature": signInternalRequest({
+        method,
+        path,
+        timestamp,
+        payload
+      })
     }
   };
 }
@@ -361,7 +387,11 @@ app.post("/v1/bets", async (req, res) => {
     const settleResponse = await axios.post(
       `${config.diceEngineUrl}/v1/settle`,
       req.body,
-      internalRequestConfig()
+      internalRequestConfig({
+        method: "POST",
+        path: "/v1/settle",
+        payload: req.body
+      })
     );
     const settlement = settleResponse.data;
 
@@ -371,7 +401,14 @@ app.post("/v1/bets", async (req, res) => {
         requestedPayout: settlement.payout,
         commit: true
       },
-      internalRequestConfig()
+      internalRequestConfig({
+        method: "POST",
+        path: "/v1/evaluate",
+        payload: {
+          requestedPayout: settlement.payout,
+          commit: true
+        }
+      })
     );
 
     const risk = riskResponse.data;
@@ -424,7 +461,11 @@ app.post("/v1/exposure/release", requireApiKey("admin"), async (req, res) => {
     const response = await axios.post(
       `${config.riskEngineUrl}/v1/release`,
       req.body,
-      internalRequestConfig()
+      internalRequestConfig({
+        method: "POST",
+        path: "/v1/release",
+        payload: req.body
+      })
     );
     try {
       await recordAdminAction("exposure_release", req.auth.apiKey, { amount: req.body.amount });
