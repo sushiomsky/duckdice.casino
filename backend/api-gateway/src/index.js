@@ -38,6 +38,7 @@ const authState = {
   backendApiKey: config.backendApiKey,
   adminApiKey: config.adminApiKey
 };
+const AUTH_STATE_KEY = "auth:keys";
 
 let rabbitChannel;
 let pgPool;
@@ -169,6 +170,36 @@ async function cacheBet(record) {
   await redisClient.set(`bet:${record.betId}`, JSON.stringify(record), { EX: config.cacheTtlSec });
 }
 
+async function persistAuthStateToRedis() {
+  await redisClient.set(AUTH_STATE_KEY, JSON.stringify({
+    backendApiKey: authState.backendApiKey,
+    adminApiKey: authState.adminApiKey,
+    updatedAt: new Date().toISOString()
+  }));
+}
+
+async function loadAuthStateFromRedis() {
+  const raw = await redisClient.get(AUTH_STATE_KEY);
+  if (!raw) {
+    await persistAuthStateToRedis();
+    return;
+  }
+
+  const parsed = JSON.parse(raw);
+  if (
+    !parsed
+    || typeof parsed.backendApiKey !== "string"
+    || typeof parsed.adminApiKey !== "string"
+    || parsed.backendApiKey.length < 16
+    || parsed.adminApiKey.length < 16
+  ) {
+    throw new Error("invalid auth state in redis");
+  }
+
+  authState.backendApiKey = parsed.backendApiKey;
+  authState.adminApiKey = parsed.adminApiKey;
+}
+
 function hashApiKey(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
@@ -287,6 +318,7 @@ app.post("/v1/admin/keys/rotate", requireApiKey("admin"), async (req, res) => {
   }
 
   const value = newKey.trim();
+  const previousState = { ...authState };
   const previousHash = target === "backend" ? hashApiKey(authState.backendApiKey) : hashApiKey(authState.adminApiKey);
   if (target === "backend") {
     authState.backendApiKey = value;
@@ -295,13 +327,21 @@ app.post("/v1/admin/keys/rotate", requireApiKey("admin"), async (req, res) => {
   }
 
   try {
+    await persistAuthStateToRedis();
     await recordAdminAction("key_rotate", req.auth.apiKey, {
       target,
       previousHash,
       newHash: hashApiKey(value)
     });
   } catch (error) {
-    return res.status(500).json({ error: "audit_log_failed", detail: toDetail(error) });
+    authState.backendApiKey = previousState.backendApiKey;
+    authState.adminApiKey = previousState.adminApiKey;
+    try {
+      await persistAuthStateToRedis();
+    } catch (rollbackError) {
+      console.error("auth state rollback failed", rollbackError.message);
+    }
+    return res.status(500).json({ error: "key_rotation_failed", detail: toDetail(error) });
   }
 
   return res.status(200).json({ rotated: target, updatedAt: new Date().toISOString() });
@@ -486,6 +526,7 @@ async function bootstrap() {
     connectPostgresWithRetry(),
     connectRedisWithRetry()
   ]);
+  await loadAuthStateFromRedis();
 
   app.listen(config.port, () => {
     console.log(`api-gateway listening on ${config.port}`);

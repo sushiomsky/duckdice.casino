@@ -23,6 +23,7 @@ This split allows horizontal scaling for latency-sensitive paths (`dice-engine`)
 - Backend secrets can be injected via env vars or file-based variants (`*_FILE`) for container secret managers.
 - `api-gateway` supports runtime API key rotation through an admin-only endpoint.
 - `api-gateway` stores admin operation audit records in PostgreSQL (`admin_actions`) with hashed key fingerprints.
+- `api-gateway` persists rotated key state in Redis (`auth:keys`) to survive service restarts.
 - Additional REST support:
   - `GET /v1/bets/:betId` resolves from Redis first, then PostgreSQL.
   - `GET /v1/bets?limit=20` returns recent persisted bets.

@@ -15,6 +15,7 @@ Public backend gateway that orchestrates bet settlement with:
 - Gateway-to-engine calls include `x-internal-token` and require matching `INTERNAL_API_TOKEN` on internal services.
 - Sensitive tokens support file-based loading via `BACKEND_API_KEY_FILE`, `ADMIN_API_KEY_FILE`, and `INTERNAL_API_TOKEN_FILE`.
 - Admin actions are written to PostgreSQL `admin_actions` with hashed actor key fingerprints.
+- Runtime key state is persisted in Redis (`auth:keys`) so rotations survive gateway restarts.
 
 ## Endpoints
 - `POST /v1/bets`
