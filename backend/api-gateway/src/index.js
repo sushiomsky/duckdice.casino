@@ -45,6 +45,7 @@ const authState = {
 };
 const AUTH_STATE_KEY = "auth:keys";
 const METRIC_PREFIX = "metrics";
+const LATENCY_BUCKETS_MS = [5, 10, 25, 50, 100, 250, 500, 1000, 2000, 5000];
 
 let rabbitChannel;
 let pgPool;
@@ -166,6 +167,15 @@ function metricKey(name, bucket) {
   return `${METRIC_PREFIX}:${name}:${bucket}`;
 }
 
+function latencyBucketLabel(latencyMs) {
+  for (const bound of LATENCY_BUCKETS_MS) {
+    if (latencyMs <= bound) {
+      return `le_${bound}`;
+    }
+  }
+  return "gt_5000";
+}
+
 async function incrementMetric(name, timestampMs = Date.now()) {
   const bucket = minuteBucket(timestampMs);
   const key = metricKey(name, bucket);
@@ -198,6 +208,23 @@ async function sumMetric(name, lookbackMinutes, timestampMs = Date.now()) {
 
 function perMinuteRate(count, lookbackMinutes) {
   return Number((count / lookbackMinutes).toFixed(4));
+}
+
+function latencyPercentileFromBuckets(buckets, percentile) {
+  const total = Object.values(buckets).reduce((sum, count) => sum + count, 0);
+  if (total === 0) {
+    return null;
+  }
+
+  const target = Math.ceil(total * percentile);
+  let seen = 0;
+  for (const bound of LATENCY_BUCKETS_MS) {
+    seen += buckets[`le_${bound}`] || 0;
+    if (seen >= target) {
+      return bound;
+    }
+  }
+  return 5000;
 }
 
 async function persistBet(record) {
@@ -290,10 +317,12 @@ async function recordAdminAction(action, actorApiKey, details) {
 
 async function recordInternalCallMetrics(name, startedAtMs, success) {
   const elapsedMs = Math.max(0, Date.now() - startedAtMs);
+  const bucketLabel = latencyBucketLabel(elapsedMs);
   try {
     await Promise.all([
       incrementMetric(`internal_call:${name}:count`),
       incrementMetricBy(`internal_call:${name}:latency_ms_sum`, elapsedMs),
+      incrementMetric(`internal_call:${name}:latency_bucket:${bucketLabel}`),
       success ? Promise.resolve() : incrementMetric(`internal_call:${name}:error`)
     ]);
   } catch (error) {
@@ -319,6 +348,36 @@ async function postInternalService(name, url, payload, path) {
     await recordInternalCallMetrics(name, startedAtMs, false);
     throw error;
   }
+}
+
+async function readInternalCallTelemetry(name, lookbackMinutes) {
+  const [calls, errors, latencyMsSum, ...bucketValues] = await Promise.all([
+    sumMetric(`internal_call:${name}:count`, lookbackMinutes),
+    sumMetric(`internal_call:${name}:error`, lookbackMinutes),
+    sumMetric(`internal_call:${name}:latency_ms_sum`, lookbackMinutes),
+    ...LATENCY_BUCKETS_MS.map((bound) => sumMetric(`internal_call:${name}:latency_bucket:le_${bound}`, lookbackMinutes)),
+    sumMetric(`internal_call:${name}:latency_bucket:gt_5000`, lookbackMinutes)
+  ]);
+
+  const buckets = Object.fromEntries([
+    ...LATENCY_BUCKETS_MS.map((bound, index) => [`le_${bound}`, bucketValues[index]]),
+    ["gt_5000", bucketValues[bucketValues.length - 1]]
+  ]);
+  const latencySampleCount = Object.values(buckets).reduce((sum, count) => sum + count, 0);
+
+  const avgLatencyMs = calls > 0 ? Number((latencyMsSum / calls).toFixed(2)) : 0;
+  const errorRate = calls > 0 ? Number((errors / calls).toFixed(4)) : 0;
+
+  return {
+    calls,
+    errors,
+    errorRate,
+    avgLatencyMs,
+    latencySampleCount,
+    p50LatencyMs: latencyPercentileFromBuckets(buckets, 0.5),
+    p95LatencyMs: latencyPercentileFromBuckets(buckets, 0.95),
+    latencyBuckets: buckets
+  };
 }
 
 function internalRequestConfig({ method, path, payload }) {
@@ -632,15 +691,9 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
       adminByActionQuery,
       betByStatusQuery,
       failedByReasonQuery,
-      diceSettleCalls,
-      diceSettleErrors,
-      diceSettleLatencyMs,
-      riskEvaluateCalls,
-      riskEvaluateErrors,
-      riskEvaluateLatencyMs,
-      riskReleaseCalls,
-      riskReleaseErrors,
-      riskReleaseLatencyMs,
+      diceSettleMetrics,
+      riskEvaluateMetrics,
+      riskReleaseMetrics,
       acceptedEvents,
       rejectedEvents,
       errorEvents
@@ -688,15 +741,9 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
         `,
         [since]
       ),
-      sumMetric("internal_call:dice_settle:count", lookbackMinutes),
-      sumMetric("internal_call:dice_settle:error", lookbackMinutes),
-      sumMetric("internal_call:dice_settle:latency_ms_sum", lookbackMinutes),
-      sumMetric("internal_call:risk_evaluate:count", lookbackMinutes),
-      sumMetric("internal_call:risk_evaluate:error", lookbackMinutes),
-      sumMetric("internal_call:risk_evaluate:latency_ms_sum", lookbackMinutes),
-      sumMetric("internal_call:risk_release:count", lookbackMinutes),
-      sumMetric("internal_call:risk_release:error", lookbackMinutes),
-      sumMetric("internal_call:risk_release:latency_ms_sum", lookbackMinutes),
+      readInternalCallTelemetry("dice_settle", lookbackMinutes),
+      readInternalCallTelemetry("risk_evaluate", lookbackMinutes),
+      readInternalCallTelemetry("risk_release", lookbackMinutes),
       sumMetric("event_published:bet.accepted", lookbackMinutes),
       sumMetric("event_published:bet.rejected", lookbackMinutes),
       sumMetric("event_published:bet.error", lookbackMinutes)
@@ -711,44 +758,11 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
     const failedByReason = Object.fromEntries(
       failedByReasonQuery.rows.map((row) => [row.reason, Number(row.count)])
     );
-    const internalCalls = Object.fromEntries(
-      [
-        {
-          key: "diceSettle",
-          calls: diceSettleCalls,
-          errors: diceSettleErrors,
-          latencyMsSum: diceSettleLatencyMs
-        },
-        {
-          key: "riskEvaluate",
-          calls: riskEvaluateCalls,
-          errors: riskEvaluateErrors,
-          latencyMsSum: riskEvaluateLatencyMs
-        },
-        {
-          key: "riskRelease",
-          calls: riskReleaseCalls,
-          errors: riskReleaseErrors,
-          latencyMsSum: riskReleaseLatencyMs
-        }
-      ].map((entry) => {
-        const avgLatencyMs = entry.calls > 0
-          ? Number((entry.latencyMsSum / entry.calls).toFixed(2))
-          : 0;
-        const errorRate = entry.calls > 0
-          ? Number((entry.errors / entry.calls).toFixed(4))
-          : 0;
-        return [
-          entry.key,
-          {
-            calls: entry.calls,
-            errors: entry.errors,
-            errorRate,
-            avgLatencyMs
-          }
-        ];
-      })
-    );
+    const internalCalls = {
+      diceSettle: diceSettleMetrics,
+      riskEvaluate: riskEvaluateMetrics,
+      riskRelease: riskReleaseMetrics
+    };
     const totalEvents = acceptedEvents + rejectedEvents + errorEvents;
 
     return res.status(200).json({
