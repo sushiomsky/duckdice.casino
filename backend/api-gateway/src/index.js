@@ -919,6 +919,7 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
   const rawIncludeRateLimitDetails = req.query.includeRateLimitDetails;
   const rawComparePreviousWindow = req.query.comparePreviousWindow;
   const rawTopN = req.query.topN;
+  const rawFields = req.query.fields;
   const lookbackMinutes = rawLookbackMinutes === undefined ? 60 : Number(rawLookbackMinutes);
   if (!Number.isInteger(lookbackMinutes) || lookbackMinutes <= 0 || lookbackMinutes > config.metricsRetentionMinutes) {
     return res.status(400).json({ error: "invalid_lookback_minutes" });
@@ -946,6 +947,18 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
   const topN = rawTopN === undefined ? 10 : Number(rawTopN);
   if (!Number.isInteger(topN) || topN <= 0 || topN > 50) {
     return res.status(400).json({ error: "invalid_top_n" });
+  }
+  const allowedFields = new Set(["rateLimit", "adminActions", "internalCalls", "bets", "events", "alerts", "comparison"]);
+  let fieldsFilter = null;
+  if (rawFields !== undefined) {
+    const requested = String(rawFields)
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (requested.length === 0 || requested.some((field) => !allowedFields.has(field))) {
+      return res.status(400).json({ error: "invalid_fields" });
+    }
+    fieldsFilter = requested;
   }
 
   const nowMs = Date.now();
@@ -1117,7 +1130,7 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
       })()
       : undefined;
 
-    return res.status(200).json({
+    const responsePayload = {
       generatedAt: nowIso,
       lookbackMinutes,
       rateLimit: {
@@ -1146,7 +1159,19 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
       },
       alerts,
       comparison
-    });
+    };
+    if (!fieldsFilter) {
+      return res.status(200).json(responsePayload);
+    }
+
+    const filteredPayload = {
+      generatedAt: responsePayload.generatedAt,
+      lookbackMinutes: responsePayload.lookbackMinutes
+    };
+    for (const field of fieldsFilter) {
+      filteredPayload[field] = responsePayload[field];
+    }
+    return res.status(200).json(filteredPayload);
   } catch (error) {
     return res.status(500).json({ error: "admin_stats_failed", detail: toDetail(error) });
   }
