@@ -147,6 +147,23 @@ app.get("/health", (_req, res) => {
       bankroll: config.bankroll,
       maxPayoutPercent: config.maxPayoutPercent,
       maxExposure: config.maxExposure
+    },
+    infra: {
+      redis: Boolean(redisClient?.isReady)
+    },
+    security: {
+      internalAuth: {
+        tokenRequired: true,
+        signatureRequired: true,
+        requestIdRequired: true,
+        maxSkewMs: config.internalAuthMaxSkewMs,
+        hasDedicatedSigningKey: config.internalRequestSigningKey !== config.internalApiToken
+      },
+      replayProtection: {
+        enabled: true,
+        windowMs: config.internalReplayTtlMs,
+        storeReady: Boolean(redisClient?.isReady)
+      }
     }
   });
 });

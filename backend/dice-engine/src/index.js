@@ -140,7 +140,27 @@ function settleBet({ serverSeed, clientSeed, nonce, amount, target, houseEdgeBps
   return { roll, won, payout, proof };
 }
 
-app.get("/health", (_req, res) => res.json({ status: "ok", service: "dice-engine" }));
+app.get("/health", (_req, res) => res.json({
+  status: "ok",
+  service: "dice-engine",
+  infra: {
+    redis: Boolean(redisClient?.isReady)
+  },
+  security: {
+    internalAuth: {
+      tokenRequired: true,
+      signatureRequired: true,
+      requestIdRequired: true,
+      maxSkewMs: config.internalAuthMaxSkewMs,
+      hasDedicatedSigningKey: config.internalRequestSigningKey !== config.internalApiToken
+    },
+    replayProtection: {
+      enabled: true,
+      windowMs: config.internalReplayTtlMs,
+      storeReady: Boolean(redisClient?.isReady)
+    }
+  }
+}));
 app.use("/v1", internalAuth);
 
 app.post("/v1/settle", (req, res) => {

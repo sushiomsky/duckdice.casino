@@ -19,6 +19,8 @@ Public backend gateway that orchestrates bet settlement with:
 - Runtime key state is persisted in Redis (`auth:keys`) so rotations survive gateway restarts.
 
 ## Endpoints
+- `GET /` (service status landing response)
+- `GET /health` (infra + security readiness diagnostics)
 - `POST /v1/bets`
 - `POST /v1/exposure/release`
 - `GET /v1/bets/:betId`

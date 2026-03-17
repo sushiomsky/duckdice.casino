@@ -47,6 +47,7 @@ const AUTH_STATE_KEY = "auth:keys";
 let rabbitChannel;
 let pgPool;
 let redisClient;
+let authStateLoaded = false;
 
 async function connectRabbitWithRetry() {
   while (!rabbitChannel) {
@@ -186,6 +187,7 @@ async function loadAuthStateFromRedis() {
   const raw = await redisClient.get(AUTH_STATE_KEY);
   if (!raw) {
     await persistAuthStateToRedis();
+    authStateLoaded = true;
     return;
   }
 
@@ -202,6 +204,7 @@ async function loadAuthStateFromRedis() {
 
   authState.backendApiKey = parsed.backendApiKey;
   authState.adminApiKey = parsed.adminApiKey;
+  authStateLoaded = true;
 }
 
 function hashApiKey(value) {
@@ -344,6 +347,22 @@ app.get("/health", (_req, res) => {
       rabbitmq: Boolean(rabbitChannel),
       postgres: Boolean(pgPool),
       redis: Boolean(redisClient?.isReady)
+    },
+    security: {
+      apiKeyScopes: {
+        backend: true,
+        admin: true
+      },
+      internalAuth: {
+        tokenRequired: true,
+        signatureRequired: true,
+        requestIdRequired: true,
+        hasDedicatedSigningKey: config.internalRequestSigningKey !== config.internalApiToken
+      },
+      keyState: {
+        redisBacked: true,
+        loaded: authStateLoaded
+      }
     }
   });
 });
