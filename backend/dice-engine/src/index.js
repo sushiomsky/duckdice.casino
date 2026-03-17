@@ -4,6 +4,18 @@ const express = require("express");
 const app = express();
 app.use(express.json());
 
+const config = {
+  internalApiToken: process.env.INTERNAL_API_TOKEN || "duckdice-internal-token"
+};
+
+function internalAuth(req, res, next) {
+  const token = req.header("x-internal-token");
+  if (!token || token !== config.internalApiToken) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  return next();
+}
+
 function rollDice({ serverSeed, clientSeed, nonce }) {
   const payload = `${serverSeed}:${clientSeed}:${nonce}`;
   const proof = crypto.createHash("sha256").update(payload).digest("hex");
@@ -27,6 +39,7 @@ function settleBet({ serverSeed, clientSeed, nonce, amount, target, houseEdgeBps
 }
 
 app.get("/health", (_req, res) => res.json({ status: "ok", service: "dice-engine" }));
+app.use("/v1", internalAuth);
 
 app.post("/v1/settle", (req, res) => {
   try {

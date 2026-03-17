@@ -26,6 +26,7 @@ services:
       context: ./backend/dice-engine
     environment:
       - PORT=4001
+      - INTERNAL_API_TOKEN=duckdice-internal-token
     ports:
       - "4001:4001"
 
@@ -37,6 +38,7 @@ services:
       - BANKROLL=25000
       - MAX_PAYOUT_PERCENT=0.05
       - MAX_EXPOSURE=5000
+      - INTERNAL_API_TOKEN=duckdice-internal-token
     ports:
       - "4002:4002"
 
@@ -59,6 +61,7 @@ services:
       - REDIS_URL=redis://redis:6379
       - BET_CACHE_TTL_SEC=300
       - BACKEND_API_KEY=duckdice-backend-key
+      - INTERNAL_API_TOKEN=duckdice-internal-token
       - RATE_LIMIT_WINDOW_MS=60000
       - RATE_LIMIT_MAX_REQUESTS=120
     ports:

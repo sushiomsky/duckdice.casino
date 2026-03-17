@@ -6,10 +6,19 @@ app.use(express.json());
 const config = {
   bankroll: Number(process.env.BANKROLL || 10000),
   maxPayoutPercent: Number(process.env.MAX_PAYOUT_PERCENT || 0.05),
-  maxExposure: Number(process.env.MAX_EXPOSURE || 3000)
+  maxExposure: Number(process.env.MAX_EXPOSURE || 3000),
+  internalApiToken: process.env.INTERNAL_API_TOKEN || "duckdice-internal-token"
 };
 
 let activeExposure = 0;
+
+function internalAuth(req, res, next) {
+  const token = req.header("x-internal-token");
+  if (!token || token !== config.internalApiToken) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  return next();
+}
 
 function evaluateRisk(requestedPayout) {
   if (config.bankroll <= 0) return { accepted: false, reason: "invalid_bankroll", projectedExposure: activeExposure };
@@ -28,8 +37,19 @@ function evaluateRisk(requestedPayout) {
 }
 
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", service: "risk-engine", activeExposure, config });
+  res.json({
+    status: "ok",
+    service: "risk-engine",
+    activeExposure,
+    config: {
+      bankroll: config.bankroll,
+      maxPayoutPercent: config.maxPayoutPercent,
+      maxExposure: config.maxExposure
+    }
+  });
 });
+
+app.use("/v1", internalAuth);
 
 app.post("/v1/evaluate", (req, res) => {
   const requestedPayout = Number(req.body.requestedPayout || 0);

@@ -11,6 +11,7 @@ app.use(express.json());
 const config = {
   port: Number(process.env.PORT || 4000),
   backendApiKey: process.env.BACKEND_API_KEY || "duckdice-backend-key",
+  internalApiToken: process.env.INTERNAL_API_TOKEN || "duckdice-internal-token",
   rateLimitWindowMs: Number(process.env.RATE_LIMIT_WINDOW_MS || 60_000),
   rateLimitMaxRequests: Number(process.env.RATE_LIMIT_MAX_REQUESTS || 120),
   diceEngineUrl: process.env.DICE_ENGINE_URL || "http://dice-engine:4001",
@@ -132,6 +133,15 @@ async function cacheBet(record) {
   await redisClient.set(`bet:${record.betId}`, JSON.stringify(record), { EX: config.cacheTtlSec });
 }
 
+function internalRequestConfig() {
+  return {
+    timeout: 2000,
+    headers: {
+      "x-internal-token": config.internalApiToken
+    }
+  };
+}
+
 function apiKeyAuth(expectedApiKey) {
   return (req, res, next) => {
     const apiKey = req.header("x-api-key");
@@ -211,13 +221,21 @@ app.post("/v1/bets", async (req, res) => {
   const requestPayload = { ...req.body };
 
   try {
-    const settleResponse = await axios.post(`${config.diceEngineUrl}/v1/settle`, req.body, { timeout: 2000 });
+    const settleResponse = await axios.post(
+      `${config.diceEngineUrl}/v1/settle`,
+      req.body,
+      internalRequestConfig()
+    );
     const settlement = settleResponse.data;
 
-    const riskResponse = await axios.post(`${config.riskEngineUrl}/v1/evaluate`, {
-      requestedPayout: settlement.payout,
-      commit: true
-    }, { timeout: 2000 });
+    const riskResponse = await axios.post(
+      `${config.riskEngineUrl}/v1/evaluate`,
+      {
+        requestedPayout: settlement.payout,
+        commit: true
+      },
+      internalRequestConfig()
+    );
 
     const risk = riskResponse.data;
     const betRecord = {
@@ -266,7 +284,11 @@ app.post("/v1/exposure/release", async (req, res) => {
   }
 
   try {
-    const response = await axios.post(`${config.riskEngineUrl}/v1/release`, req.body, { timeout: 2000 });
+    const response = await axios.post(
+      `${config.riskEngineUrl}/v1/release`,
+      req.body,
+      internalRequestConfig()
+    );
     return res.status(200).json(response.data);
   } catch (error) {
     const detail = error.response?.data || { message: error.message };

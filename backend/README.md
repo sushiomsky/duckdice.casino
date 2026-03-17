@@ -19,6 +19,7 @@ This split allows horizontal scaling for latency-sensitive paths (`dice-engine`)
 - `api-gateway` persists each processed bet to PostgreSQL (`bets` table).
 - `api-gateway` caches bet lookups in Redis for fast read-through access.
 - `api-gateway` protects `/v1/*` routes with `x-api-key` auth and in-memory rate limiting.
+- `dice-engine` and `risk-engine` protect `/v1/*` routes with `x-internal-token` for service-to-service access.
 - Additional REST support:
   - `GET /v1/bets/:betId` resolves from Redis first, then PostgreSQL.
   - `GET /v1/bets?limit=20` returns recent persisted bets.
