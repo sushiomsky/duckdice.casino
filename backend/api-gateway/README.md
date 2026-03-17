@@ -12,6 +12,7 @@ Public backend gateway that orchestrates bet settlement with:
 - All `/v1/*` endpoints require `x-api-key` matching `BACKEND_API_KEY`.
 - Redis-backed rate limiting is applied to `/v1/*` requests using `ip + api key` buckets.
 - Gateway-to-engine calls include `x-internal-token` and require matching `INTERNAL_API_TOKEN` on internal services.
+- Sensitive tokens support file-based loading via `BACKEND_API_KEY_FILE` and `INTERNAL_API_TOKEN_FILE`.
 
 ## Endpoints
 - `POST /v1/bets`

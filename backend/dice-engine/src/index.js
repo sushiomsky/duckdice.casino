@@ -1,11 +1,20 @@
 const crypto = require("node:crypto");
 const express = require("express");
+const fs = require("node:fs");
 
 const app = express();
 app.use(express.json());
 
+function getSecret(envName, fallback) {
+  const filePath = process.env[`${envName}_FILE`];
+  if (filePath) {
+    return fs.readFileSync(filePath, "utf8").trim();
+  }
+  return process.env[envName] || fallback;
+}
+
 const config = {
-  internalApiToken: process.env.INTERNAL_API_TOKEN || "duckdice-internal-token"
+  internalApiToken: getSecret("INTERNAL_API_TOKEN", "duckdice-internal-token")
 };
 
 function internalAuth(req, res, next) {

@@ -1,13 +1,22 @@
 const express = require("express");
+const fs = require("node:fs");
 
 const app = express();
 app.use(express.json());
+
+function getSecret(envName, fallback) {
+  const filePath = process.env[`${envName}_FILE`];
+  if (filePath) {
+    return fs.readFileSync(filePath, "utf8").trim();
+  }
+  return process.env[envName] || fallback;
+}
 
 const config = {
   bankroll: Number(process.env.BANKROLL || 10000),
   maxPayoutPercent: Number(process.env.MAX_PAYOUT_PERCENT || 0.05),
   maxExposure: Number(process.env.MAX_EXPOSURE || 3000),
-  internalApiToken: process.env.INTERNAL_API_TOKEN || "duckdice-internal-token"
+  internalApiToken: getSecret("INTERNAL_API_TOKEN", "duckdice-internal-token")
 };
 
 let activeExposure = 0;

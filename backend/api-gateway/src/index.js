@@ -1,6 +1,7 @@
 const express = require("express");
 const axios = require("axios");
 const amqplib = require("amqplib");
+const fs = require("node:fs");
 const { Pool } = require("pg");
 const { createClient } = require("redis");
 const { v4: uuidv4 } = require("uuid");
@@ -8,10 +9,18 @@ const { v4: uuidv4 } = require("uuid");
 const app = express();
 app.use(express.json());
 
+function getSecret(envName, fallback) {
+  const filePath = process.env[`${envName}_FILE`];
+  if (filePath) {
+    return fs.readFileSync(filePath, "utf8").trim();
+  }
+  return process.env[envName] || fallback;
+}
+
 const config = {
   port: Number(process.env.PORT || 4000),
-  backendApiKey: process.env.BACKEND_API_KEY || "duckdice-backend-key",
-  internalApiToken: process.env.INTERNAL_API_TOKEN || "duckdice-internal-token",
+  backendApiKey: getSecret("BACKEND_API_KEY", "duckdice-backend-key"),
+  internalApiToken: getSecret("INTERNAL_API_TOKEN", "duckdice-internal-token"),
   rateLimitWindowMs: Number(process.env.RATE_LIMIT_WINDOW_MS || 60_000),
   rateLimitMaxRequests: Number(process.env.RATE_LIMIT_MAX_REQUESTS || 120),
   diceEngineUrl: process.env.DICE_ENGINE_URL || "http://dice-engine:4001",
