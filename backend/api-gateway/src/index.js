@@ -55,6 +55,13 @@ const AUTH_STATE_KEY = "auth:keys";
 const METRIC_PREFIX = "metrics";
 const LATENCY_BUCKETS_MS = [5, 10, 25, 50, 100, 250, 500, 1000, 2000, 5000];
 const TIMEOUT_ERROR_LABELS = new Set(["econnaborted", "etimedout", "timeout"]);
+const SLO_OBJECTIVES = {
+  request5xxRateMax: 0.01,
+  failedBetRateMax: 0.02,
+  internalErrorRateMax: 0.01,
+  internalTimeoutErrorRateMax: 0.005,
+  eventErrorRateMax: 0.01
+};
 const ENDPOINT_METRIC_LABELS = {
   post_bets: "POST /v1/bets",
   post_exposure_release: "POST /v1/exposure/release",
@@ -489,6 +496,105 @@ function buildStatsTriage({ lookbackMinutes, requestVolumes, failedByReason, int
     internalHotspots,
     failedReasonHotspots,
     recommendedActions
+  };
+}
+
+function buildStatsSlo({ lookbackMinutes, requestVolumes, betByStatus, internalCalls, eventsPublished }) {
+  const totalRequests = requestVolumes.total || 0;
+  const totalRequest5xx = Object.values(requestVolumes.byEndpoint || {})
+    .reduce((sum, metrics) => sum + Number(metrics?.status?.["5xx"] || 0), 0);
+  const request5xxRate = totalRequests > 0 ? Number((totalRequest5xx / totalRequests).toFixed(4)) : 0;
+
+  const acceptedBets = Number(betByStatus.accepted || 0);
+  const rejectedBets = Number(betByStatus.rejected || 0);
+  const errorBets = Number(betByStatus.error || 0);
+  const totalBets = Object.values(betByStatus).reduce((sum, count) => sum + count, 0);
+  const failedBets = rejectedBets + errorBets;
+  const failedBetRate = totalBets > 0 ? Number((failedBets / totalBets).toFixed(4)) : 0;
+
+  const internalTotals = Object.values(internalCalls).reduce((acc, metrics) => {
+    acc.calls += Number(metrics.calls || 0);
+    acc.errors += Number(metrics.errors || 0);
+    acc.timeoutErrors += countTimeoutErrors(metrics.errorByType || {});
+    return acc;
+  }, { calls: 0, errors: 0, timeoutErrors: 0 });
+  const internalErrorRate = internalTotals.calls > 0
+    ? Number((internalTotals.errors / internalTotals.calls).toFixed(4))
+    : 0;
+  const internalTimeoutErrorRate = internalTotals.calls > 0
+    ? Number((internalTotals.timeoutErrors / internalTotals.calls).toFixed(4))
+    : 0;
+
+  const totalEvents = Number(eventsPublished.total || 0);
+  const errorEvents = Number(eventsPublished.error || 0);
+  const eventErrorRate = totalEvents > 0 ? Number((errorEvents / totalEvents).toFixed(4)) : 0;
+
+  const breaches = [];
+  const addBreach = (metric, value, threshold, message) => {
+    if (value <= threshold) {
+      return;
+    }
+    breaches.push({
+      metric,
+      value,
+      threshold,
+      severity: value >= threshold * 2 ? "critical" : "warning",
+      message
+    });
+  };
+
+  addBreach(
+    "request5xxRate",
+    request5xxRate,
+    SLO_OBJECTIVES.request5xxRateMax,
+    `Request 5xx rate is ${(request5xxRate * 100).toFixed(2)}% (target <= ${(SLO_OBJECTIVES.request5xxRateMax * 100).toFixed(2)}%).`
+  );
+  addBreach(
+    "failedBetRate",
+    failedBetRate,
+    SLO_OBJECTIVES.failedBetRateMax,
+    `Failed bet rate is ${(failedBetRate * 100).toFixed(2)}% (target <= ${(SLO_OBJECTIVES.failedBetRateMax * 100).toFixed(2)}%).`
+  );
+  addBreach(
+    "internalErrorRate",
+    internalErrorRate,
+    SLO_OBJECTIVES.internalErrorRateMax,
+    `Internal call error rate is ${(internalErrorRate * 100).toFixed(2)}% (target <= ${(SLO_OBJECTIVES.internalErrorRateMax * 100).toFixed(2)}%).`
+  );
+  addBreach(
+    "internalTimeoutErrorRate",
+    internalTimeoutErrorRate,
+    SLO_OBJECTIVES.internalTimeoutErrorRateMax,
+    `Internal timeout error rate is ${(internalTimeoutErrorRate * 100).toFixed(2)}% (target <= ${(SLO_OBJECTIVES.internalTimeoutErrorRateMax * 100).toFixed(2)}%).`
+  );
+  addBreach(
+    "eventErrorRate",
+    eventErrorRate,
+    SLO_OBJECTIVES.eventErrorRateMax,
+    `Published error-event rate is ${(eventErrorRate * 100).toFixed(2)}% (target <= ${(SLO_OBJECTIVES.eventErrorRateMax * 100).toFixed(2)}%).`
+  );
+
+  const hasCritical = breaches.some((breach) => breach.severity === "critical");
+  const status = hasCritical ? "critical" : (breaches.length > 0 ? "warning" : "ok");
+
+  return {
+    status,
+    lookbackMinutes,
+    objectives: SLO_OBJECTIVES,
+    measurements: {
+      totalRequests,
+      request5xxRate,
+      totalBets,
+      acceptedBets,
+      failedBets,
+      failedBetRate,
+      internalCallTotal: internalTotals.calls,
+      internalErrorRate,
+      internalTimeoutErrorRate,
+      eventTotal: totalEvents,
+      eventErrorRate
+    },
+    breaches
   };
 }
 
@@ -1234,7 +1340,7 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
   if (!Number.isInteger(topN) || topN <= 0 || topN > 50) {
     return res.status(400).json({ error: "invalid_top_n" });
   }
-  const allowedFields = new Set(["rateLimit", "adminActions", "internalCalls", "bets", "events", "alerts", "comparison", "requestVolumes", "summary", "triage"]);
+  const allowedFields = new Set(["rateLimit", "adminActions", "internalCalls", "bets", "events", "alerts", "comparison", "requestVolumes", "summary", "triage", "slo"]);
   let fieldsFilter = null;
   if (rawFields !== undefined) {
     const requested = String(rawFields)
@@ -1404,6 +1510,13 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
       internalCalls,
       topN
     });
+    const slo = buildStatsSlo({
+      lookbackMinutes,
+      requestVolumes,
+      betByStatus,
+      internalCalls,
+      eventsPublished
+    });
     const comparison = comparePreviousWindow
       ? (() => {
         const previousBetByStatus = Object.fromEntries(
@@ -1475,6 +1588,7 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
       alerts,
       summary,
       triage,
+      slo,
       comparison
     };
     if (!fieldsFilter) {
