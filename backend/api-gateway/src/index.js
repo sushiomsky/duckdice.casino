@@ -55,6 +55,11 @@ const AUTH_STATE_KEY = "auth:keys";
 const METRIC_PREFIX = "metrics";
 const LATENCY_BUCKETS_MS = [5, 10, 25, 50, 100, 250, 500, 1000, 2000, 5000];
 const TIMEOUT_ERROR_LABELS = new Set(["econnaborted", "etimedout", "timeout"]);
+const ALERT_LEVEL_PRIORITY = {
+  info: 0,
+  warning: 1,
+  critical: 2
+};
 const SLO_OBJECTIVES = {
   request5xxRateMax: 0.01,
   failedBetRateMax: 0.02,
@@ -357,6 +362,32 @@ function buildStatsAlerts({ lookbackMinutes, rateLimitExceeded, failedByReason, 
   }
 
   return alerts;
+}
+
+function filterAlertsByMinLevel(alerts, minAlertLevel) {
+  const threshold = ALERT_LEVEL_PRIORITY[minAlertLevel] ?? ALERT_LEVEL_PRIORITY.info;
+  return alerts.filter((alert) => {
+    const levelPriority = ALERT_LEVEL_PRIORITY[alert.level];
+    return levelPriority !== undefined && levelPriority >= threshold;
+  });
+}
+
+function alertLevelCounts(alerts) {
+  return {
+    info: alerts.filter((alert) => alert.level === "info").length,
+    warning: alerts.filter((alert) => alert.level === "warning").length,
+    critical: alerts.filter((alert) => alert.level === "critical").length
+  };
+}
+
+function buildAlertsSummary(baseAlerts, filteredAlerts, minAlertLevel) {
+  return {
+    minAlertLevel,
+    total: filteredAlerts.length,
+    filteredOut: Math.max(0, baseAlerts.length - filteredAlerts.length),
+    byLevel: alertLevelCounts(filteredAlerts),
+    baseByLevel: alertLevelCounts(baseAlerts)
+  };
 }
 
 function buildStatsSummary({ lookbackMinutes, alerts, betByStatus, requestVolumes, internalCalls, eventsPublished }) {
@@ -1413,6 +1444,7 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
   const rawComparePreviousWindow = req.query.comparePreviousWindow;
   const rawIncludeTimeoutDiagnostics = req.query.includeTimeoutDiagnostics;
   const rawIncludeSelfEndpoint = req.query.includeSelfEndpoint;
+  const rawMinAlertLevel = req.query.minAlertLevel;
   const rawTopN = req.query.topN;
   const rawFields = req.query.fields;
   const lookbackMinutes = rawLookbackMinutes === undefined ? 60 : Number(rawLookbackMinutes);
@@ -1459,11 +1491,15 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
       return res.status(400).json({ error: "invalid_include_self_endpoint" });
     }
   }
+  const minAlertLevel = rawMinAlertLevel === undefined ? "info" : String(rawMinAlertLevel).trim().toLowerCase();
+  if (!Object.hasOwn(ALERT_LEVEL_PRIORITY, minAlertLevel)) {
+    return res.status(400).json({ error: "invalid_min_alert_level" });
+  }
   const topN = rawTopN === undefined ? 10 : Number(rawTopN);
   if (!Number.isInteger(topN) || topN <= 0 || topN > 50) {
     return res.status(400).json({ error: "invalid_top_n" });
   }
-  const allowedFields = new Set(["rateLimit", "adminActions", "internalCalls", "bets", "events", "alerts", "comparison", "requestVolumes", "summary", "triage", "slo"]);
+  const allowedFields = new Set(["rateLimit", "adminActions", "internalCalls", "bets", "events", "alerts", "alertsSummary", "comparison", "requestVolumes", "summary", "triage", "slo"]);
   let fieldsFilter = null;
   if (rawFields !== undefined) {
     const requested = String(rawFields)
@@ -1685,6 +1721,8 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
       eventsPublished,
       slo
     });
+    const filteredAlerts = filterAlertsByMinLevel(alerts, minAlertLevel);
+    const alertsSummary = buildAlertsSummary(alerts, filteredAlerts, minAlertLevel);
     const triage = buildStatsTriage({
       lookbackMinutes,
       requestVolumes,
@@ -1775,7 +1813,8 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
           total: perMinuteRate(totalEvents, lookbackMinutes)
         }
       },
-      alerts,
+      alerts: filteredAlerts,
+      alertsSummary,
       summary,
       triage,
       slo,
