@@ -636,6 +636,57 @@ function buildStatsSlo({ lookbackMinutes, requestVolumes, betByStatus, internalC
   };
 }
 
+function buildSloComparison(currentSlo, previousSlo) {
+  const burnRateOrZero = (slo, metric) => Number(slo?.burnRates?.[metric]?.burnRate || 0);
+  return {
+    status: {
+      current: currentSlo.status,
+      previous: previousSlo.status,
+      changed: currentSlo.status !== previousSlo.status
+    },
+    measurements: {
+      request5xxRate: metricComparison(
+        currentSlo.measurements.request5xxRate,
+        previousSlo.measurements.request5xxRate
+      ),
+      failedBetRate: metricComparison(
+        currentSlo.measurements.failedBetRate,
+        previousSlo.measurements.failedBetRate
+      ),
+      internalErrorRate: metricComparison(
+        currentSlo.measurements.internalErrorRate,
+        previousSlo.measurements.internalErrorRate
+      ),
+      eventErrorRate: metricComparison(
+        currentSlo.measurements.eventErrorRate,
+        previousSlo.measurements.eventErrorRate
+      )
+    },
+    burnRates: {
+      request5xxRate: metricComparison(
+        burnRateOrZero(currentSlo, "request5xxRate"),
+        burnRateOrZero(previousSlo, "request5xxRate")
+      ),
+      failedBetRate: metricComparison(
+        burnRateOrZero(currentSlo, "failedBetRate"),
+        burnRateOrZero(previousSlo, "failedBetRate")
+      ),
+      internalErrorRate: metricComparison(
+        burnRateOrZero(currentSlo, "internalErrorRate"),
+        burnRateOrZero(previousSlo, "internalErrorRate")
+      ),
+      eventErrorRate: metricComparison(
+        burnRateOrZero(currentSlo, "eventErrorRate"),
+        burnRateOrZero(previousSlo, "eventErrorRate")
+      )
+    },
+    atRiskMetrics: {
+      current: currentSlo.atRiskMetrics,
+      previous: previousSlo.atRiskMetrics
+    }
+  };
+}
+
 function parseRateLimitKey(key) {
   if (!key.startsWith("rate:")) {
     return null;
@@ -1416,7 +1467,13 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
       previousRateLimitExceeded,
       previousAcceptedEvents,
       previousRejectedEvents,
-      previousErrorEvents
+      previousErrorEvents,
+      previousDiceSettleCalls,
+      previousDiceSettleErrors,
+      previousRiskEvaluateCalls,
+      previousRiskEvaluateErrors,
+      previousRiskReleaseCalls,
+      previousRiskReleaseErrors
     ] = await Promise.all([
       sumMetric("rate_limit_exceeded", lookbackMinutes),
       includeRateLimitDetails ? readRateLimitDiagnostics(topN) : null,
@@ -1502,6 +1559,24 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
         : null,
       comparePreviousWindow
         ? sumMetric("event_published:bet.error", lookbackMinutes, nowMs - lookbackMinutes * 60_000)
+        : null,
+      comparePreviousWindow
+        ? sumMetric("internal_call:dice_settle:count", lookbackMinutes, nowMs - lookbackMinutes * 60_000)
+        : null,
+      comparePreviousWindow
+        ? sumMetric("internal_call:dice_settle:error", lookbackMinutes, nowMs - lookbackMinutes * 60_000)
+        : null,
+      comparePreviousWindow
+        ? sumMetric("internal_call:risk_evaluate:count", lookbackMinutes, nowMs - lookbackMinutes * 60_000)
+        : null,
+      comparePreviousWindow
+        ? sumMetric("internal_call:risk_evaluate:error", lookbackMinutes, nowMs - lookbackMinutes * 60_000)
+        : null,
+      comparePreviousWindow
+        ? sumMetric("internal_call:risk_release:count", lookbackMinutes, nowMs - lookbackMinutes * 60_000)
+        : null,
+      comparePreviousWindow
+        ? sumMetric("internal_call:risk_release:error", lookbackMinutes, nowMs - lookbackMinutes * 60_000)
         : null
     ]);
 
@@ -1526,6 +1601,41 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
       error: errorEvents,
       total: totalEvents
     };
+    const previousBetByStatus = comparePreviousWindow
+      ? Object.fromEntries(
+        previousBetByStatusQuery.rows.map((row) => [row.status, Number(row.count)])
+      )
+      : {};
+    const previousEventsTotal = comparePreviousWindow
+      ? previousAcceptedEvents + previousRejectedEvents + previousErrorEvents
+      : 0;
+    const previousEventsPublished = comparePreviousWindow
+      ? {
+        accepted: previousAcceptedEvents,
+        rejected: previousRejectedEvents,
+        error: previousErrorEvents,
+        total: previousEventsTotal
+      }
+      : null;
+    const previousInternalCalls = comparePreviousWindow
+      ? {
+        diceSettle: {
+          calls: Number(previousDiceSettleCalls || 0),
+          errors: Number(previousDiceSettleErrors || 0),
+          errorByType: {}
+        },
+        riskEvaluate: {
+          calls: Number(previousRiskEvaluateCalls || 0),
+          errors: Number(previousRiskEvaluateErrors || 0),
+          errorByType: {}
+        },
+        riskRelease: {
+          calls: Number(previousRiskReleaseCalls || 0),
+          errors: Number(previousRiskReleaseErrors || 0),
+          errorByType: {}
+        }
+      }
+      : null;
     const alerts = buildStatsAlerts({
       lookbackMinutes,
       rateLimitExceeded,
@@ -1555,12 +1665,17 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
       internalCalls,
       eventsPublished
     });
+    const previousSlo = comparePreviousWindow
+      ? buildStatsSlo({
+        lookbackMinutes,
+        requestVolumes: previousRequestVolumes,
+        betByStatus: previousBetByStatus,
+        internalCalls: previousInternalCalls,
+        eventsPublished: previousEventsPublished
+      })
+      : null;
     const comparison = comparePreviousWindow
       ? (() => {
-        const previousBetByStatus = Object.fromEntries(
-          previousBetByStatusQuery.rows.map((row) => [row.status, Number(row.count)])
-        );
-        const previousEventsTotal = previousAcceptedEvents + previousRejectedEvents + previousErrorEvents;
         return {
           window: {
             current: {
@@ -1587,7 +1702,8 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
           requestVolumesByEndpoint: mapMetricComparisons(
             toComparableEndpointCounts(requestVolumes.byKey),
             toComparableEndpointCounts(previousRequestVolumes.byKey)
-          )
+          ),
+          slo: buildSloComparison(slo, previousSlo)
         };
       })()
       : undefined;
