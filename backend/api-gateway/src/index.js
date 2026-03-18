@@ -415,12 +415,16 @@ function buildStatsSummary({ lookbackMinutes, alerts, betByStatus, requestVolume
   };
 }
 
-function buildStatsTriage({ lookbackMinutes, requestVolumes, failedByReason, internalCalls, topN }) {
+function buildStatsTriage({ lookbackMinutes, requestVolumes, failedByReason, internalCalls, topN, includeSelfEndpoint }) {
   const triageTopN = Math.max(1, Math.min(topN, 10));
-  const totalRequests = requestVolumes.total || 0;
+  const selfEndpointLabel = ENDPOINT_METRIC_LABELS.get_admin_stats;
+  const selfEndpointMetrics = requestVolumes.byEndpoint?.[selfEndpointLabel];
+  const excludedSelfEndpointTotal = includeSelfEndpoint ? 0 : Number(selfEndpointMetrics?.total || 0);
+  const analyzedRequestTotal = Math.max(0, (requestVolumes.total || 0) - excludedSelfEndpointTotal);
   const totalFailed = Object.values(failedByReason).reduce((sum, count) => sum + count, 0);
 
   const requestHotspots = Object.entries(requestVolumes.byEndpoint || {})
+    .filter(([endpoint]) => includeSelfEndpoint || endpoint !== selfEndpointLabel)
     .map(([endpoint, metrics]) => {
       const total = Number(metrics?.total || 0);
       const s4 = Number(metrics?.status?.["4xx"] || 0);
@@ -428,7 +432,7 @@ function buildStatsTriage({ lookbackMinutes, requestVolumes, failedByReason, int
       return {
         endpoint,
         total,
-        shareOfRequests: totalRequests > 0 ? Number((total / totalRequests).toFixed(4)) : 0,
+        shareOfRequests: analyzedRequestTotal > 0 ? Number((total / analyzedRequestTotal).toFixed(4)) : 0,
         status4xxRate: total > 0 ? Number((s4 / total).toFixed(4)) : 0,
         status5xxRate: total > 0 ? Number((s5 / total).toFixed(4)) : 0
       };
@@ -509,6 +513,9 @@ function buildStatsTriage({ lookbackMinutes, requestVolumes, failedByReason, int
   }
 
   return {
+    includeSelfEndpoint,
+    analyzedRequestTotal,
+    excludedSelfEndpointTotal,
     requestHotspots,
     internalHotspots,
     failedReasonHotspots,
@@ -1405,6 +1412,7 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
   const rawIncludeRateLimitDetails = req.query.includeRateLimitDetails;
   const rawComparePreviousWindow = req.query.comparePreviousWindow;
   const rawIncludeTimeoutDiagnostics = req.query.includeTimeoutDiagnostics;
+  const rawIncludeSelfEndpoint = req.query.includeSelfEndpoint;
   const rawTopN = req.query.topN;
   const rawFields = req.query.fields;
   const lookbackMinutes = rawLookbackMinutes === undefined ? 60 : Number(rawLookbackMinutes);
@@ -1439,6 +1447,16 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
       includeTimeoutDiagnostics = false;
     } else {
       return res.status(400).json({ error: "invalid_include_timeout_diagnostics" });
+    }
+  }
+  let includeSelfEndpoint = false;
+  if (rawIncludeSelfEndpoint !== undefined) {
+    if (rawIncludeSelfEndpoint === "true" || rawIncludeSelfEndpoint === "1") {
+      includeSelfEndpoint = true;
+    } else if (rawIncludeSelfEndpoint === "false" || rawIncludeSelfEndpoint === "0") {
+      includeSelfEndpoint = false;
+    } else {
+      return res.status(400).json({ error: "invalid_include_self_endpoint" });
     }
   }
   const topN = rawTopN === undefined ? 10 : Number(rawTopN);
@@ -1672,7 +1690,8 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
       requestVolumes,
       failedByReason,
       internalCalls,
-      topN
+      topN,
+      includeSelfEndpoint
     });
     const summary = buildStatsSummary({
       lookbackMinutes,
