@@ -62,6 +62,7 @@ const SLO_OBJECTIVES = {
   internalTimeoutErrorRateMax: 0.005,
   eventErrorRateMax: 0.01
 };
+const SLO_BUDGET_WINDOW_MINUTES = Number(process.env.SLO_BUDGET_WINDOW_MINUTES || 1440);
 const ENDPOINT_METRIC_LABELS = {
   post_bets: "POST /v1/bets",
   post_exposure_release: "POST /v1/exposure/release",
@@ -576,11 +577,45 @@ function buildStatsSlo({ lookbackMinutes, requestVolumes, betByStatus, internalC
 
   const hasCritical = breaches.some((breach) => breach.severity === "critical");
   const status = hasCritical ? "critical" : (breaches.length > 0 ? "warning" : "ok");
+  const burnRate = (value, threshold) => {
+    if (threshold <= 0 || value < 0) {
+      return {
+        burnRate: null,
+        projectedBudgetExhaustionMinutes: null
+      };
+    }
+    const currentBurnRate = Number((value / threshold).toFixed(4));
+    return {
+      burnRate: currentBurnRate,
+      projectedBudgetExhaustionMinutes: currentBurnRate > 0
+        ? Math.max(1, Math.round(SLO_BUDGET_WINDOW_MINUTES / currentBurnRate))
+        : null
+    };
+  };
+  const burnRates = {
+    request5xxRate: burnRate(request5xxRate, SLO_OBJECTIVES.request5xxRateMax),
+    failedBetRate: burnRate(failedBetRate, SLO_OBJECTIVES.failedBetRateMax),
+    internalErrorRate: burnRate(internalErrorRate, SLO_OBJECTIVES.internalErrorRateMax),
+    internalTimeoutErrorRate: burnRate(internalTimeoutErrorRate, SLO_OBJECTIVES.internalTimeoutErrorRateMax),
+    eventErrorRate: burnRate(eventErrorRate, SLO_OBJECTIVES.eventErrorRateMax)
+  };
+  const hottest = Object.entries(burnRates)
+    .map(([metric, data]) => ({
+      metric,
+      burnRate: data.burnRate,
+      projectedBudgetExhaustionMinutes: data.projectedBudgetExhaustionMinutes
+    }))
+    .filter((entry) => typeof entry.burnRate === "number" && entry.burnRate > 0)
+    .sort((a, b) => b.burnRate - a.burnRate)[0] || null;
+  const atRiskMetrics = Object.entries(burnRates)
+    .filter(([, data]) => typeof data.burnRate === "number" && data.burnRate >= 1)
+    .map(([metric]) => metric);
 
   return {
     status,
     lookbackMinutes,
     objectives: SLO_OBJECTIVES,
+    budgetWindowMinutes: SLO_BUDGET_WINDOW_MINUTES,
     measurements: {
       totalRequests,
       request5xxRate,
@@ -594,6 +629,9 @@ function buildStatsSlo({ lookbackMinutes, requestVolumes, betByStatus, internalC
       eventTotal: totalEvents,
       eventErrorRate
     },
+    burnRates,
+    highestBurnRate: hottest,
+    atRiskMetrics,
     breaches
   };
 }
