@@ -286,7 +286,7 @@ function toComparableEndpointCounts(byKey) {
   );
 }
 
-function buildStatsAlerts({ lookbackMinutes, rateLimitExceeded, failedByReason, internalCalls, eventsPublished }) {
+function buildStatsAlerts({ lookbackMinutes, rateLimitExceeded, failedByReason, internalCalls, eventsPublished, slo }) {
   const alerts = [];
 
   if (rateLimitExceeded > 0) {
@@ -333,6 +333,21 @@ function buildStatsAlerts({ lookbackMinutes, rateLimitExceeded, failedByReason, 
     });
   }
 
+  if (slo && Array.isArray(slo.breaches) && slo.breaches.length > 0) {
+    const criticalCount = slo.breaches.filter((breach) => breach.severity === "critical").length;
+    alerts.push({
+      level: criticalCount > 0 ? "critical" : "warning",
+      code: "slo_breaches_detected",
+      message: `${slo.breaches.length} SLO objective breaches detected in the last ${lookbackMinutes} minutes.`,
+      details: {
+        criticalCount,
+        warningCount: slo.breaches.length - criticalCount,
+        metrics: slo.breaches.map((breach) => breach.metric),
+        highestBurnRate: slo.highestBurnRate
+      }
+    });
+  }
+
   if (alerts.length === 0) {
     alerts.push({
       level: "info",
@@ -366,11 +381,12 @@ function buildStatsSummary({ lookbackMinutes, alerts, betByStatus, requestVolume
     }))
     .sort((a, b) => b.errorRate - a.errorRate)[0] || null;
 
-  const warningAlerts = alerts.filter((alert) => alert.level === "warning");
+  const hasCriticalAlerts = alerts.some((alert) => alert.level === "critical");
+  const hasWarningAlerts = alerts.some((alert) => alert.level === "warning");
   const totalEvents = eventsPublished.total || 0;
 
   return {
-    health: warningAlerts.length > 0 ? "warning" : "ok",
+    health: hasCriticalAlerts ? "critical" : (hasWarningAlerts ? "warning" : "ok"),
     alertCodes: alerts.map((alert) => alert.code),
     lookbackMinutes,
     requests: {
@@ -1636,20 +1652,20 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
         }
       }
       : null;
+    const slo = buildStatsSlo({
+      lookbackMinutes,
+      requestVolumes,
+      betByStatus,
+      internalCalls,
+      eventsPublished
+    });
     const alerts = buildStatsAlerts({
       lookbackMinutes,
       rateLimitExceeded,
       failedByReason,
       internalCalls,
-      eventsPublished
-    });
-    const summary = buildStatsSummary({
-      lookbackMinutes,
-      alerts,
-      betByStatus,
-      requestVolumes,
-      internalCalls,
-      eventsPublished
+      eventsPublished,
+      slo
     });
     const triage = buildStatsTriage({
       lookbackMinutes,
@@ -1658,10 +1674,11 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
       internalCalls,
       topN
     });
-    const slo = buildStatsSlo({
+    const summary = buildStatsSummary({
       lookbackMinutes,
-      requestVolumes,
+      alerts,
       betByStatus,
+      requestVolumes,
       internalCalls,
       eventsPublished
     });
