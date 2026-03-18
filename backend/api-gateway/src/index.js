@@ -391,6 +391,107 @@ function buildStatsSummary({ lookbackMinutes, alerts, betByStatus, requestVolume
   };
 }
 
+function buildStatsTriage({ lookbackMinutes, requestVolumes, failedByReason, internalCalls, topN }) {
+  const triageTopN = Math.max(1, Math.min(topN, 10));
+  const totalRequests = requestVolumes.total || 0;
+  const totalFailed = Object.values(failedByReason).reduce((sum, count) => sum + count, 0);
+
+  const requestHotspots = Object.entries(requestVolumes.byEndpoint || {})
+    .map(([endpoint, metrics]) => {
+      const total = Number(metrics?.total || 0);
+      const s4 = Number(metrics?.status?.["4xx"] || 0);
+      const s5 = Number(metrics?.status?.["5xx"] || 0);
+      return {
+        endpoint,
+        total,
+        shareOfRequests: totalRequests > 0 ? Number((total / totalRequests).toFixed(4)) : 0,
+        status4xxRate: total > 0 ? Number((s4 / total).toFixed(4)) : 0,
+        status5xxRate: total > 0 ? Number((s5 / total).toFixed(4)) : 0
+      };
+    })
+    .filter((entry) => entry.total > 0)
+    .sort((a, b) => b.total - a.total)
+    .slice(0, triageTopN);
+
+  const internalHotspots = Object.entries(internalCalls)
+    .map(([endpoint, metrics]) => {
+      const timeoutErrors = countTimeoutErrors(metrics.errorByType || {});
+      const nearTimeoutRate = Number(metrics?.timeoutBudget?.nearTimeoutRate || 0);
+      const timeoutErrorRate = metrics.calls > 0 ? Number((timeoutErrors / metrics.calls).toFixed(4)) : 0;
+      const riskScore = Number(((metrics.errorRate * 5) + (timeoutErrorRate * 3) + (nearTimeoutRate * 2)).toFixed(4));
+      return {
+        endpoint,
+        calls: metrics.calls,
+        errors: metrics.errors,
+        errorRate: metrics.errorRate,
+        timeoutErrors,
+        timeoutErrorRate,
+        nearTimeoutRate,
+        p95LatencyMs: metrics.p95LatencyMs,
+        riskScore
+      };
+    })
+    .filter((entry) => entry.calls > 0 || entry.errors > 0 || entry.timeoutErrors > 0 || entry.nearTimeoutRate > 0)
+    .sort((a, b) => (b.riskScore - a.riskScore) || (b.calls - a.calls))
+    .slice(0, triageTopN);
+
+  const failedReasonHotspots = Object.entries(failedByReason)
+    .map(([reason, count]) => ({
+      reason,
+      code: normalizeErrorTypeLabel(reason),
+      count,
+      shareOfFailed: totalFailed > 0 ? Number((count / totalFailed).toFixed(4)) : 0
+    }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, triageTopN);
+
+  const recommendedActions = [];
+  const high5xxRequest = requestHotspots.find((entry) => entry.status5xxRate > 0);
+  if (high5xxRequest) {
+    recommendedActions.push({
+      code: "check_gateway_dependency_errors",
+      message: `Investigate ${high5xxRequest.endpoint}; observed ${Math.round(high5xxRequest.status5xxRate * 100)}% 5xx responses in the last ${lookbackMinutes} minutes.`
+    });
+  }
+
+  const timeoutRisk = internalHotspots.find((entry) => entry.timeoutErrorRate > 0 || entry.nearTimeoutRate >= 0.01);
+  if (timeoutRisk) {
+    recommendedActions.push({
+      code: "check_internal_timeout_budget",
+      message: `Review ${timeoutRisk.endpoint}; timeout/near-timeout pressure detected over the last ${lookbackMinutes} minutes.`
+    });
+  }
+
+  const errorRateRisk = internalHotspots.find((entry) => entry.errorRate >= 0.01);
+  if (errorRateRisk) {
+    recommendedActions.push({
+      code: "check_internal_service_health",
+      message: `Review ${errorRateRisk.endpoint}; error rate is ${(errorRateRisk.errorRate * 100).toFixed(2)}% in the last ${lookbackMinutes} minutes.`
+    });
+  }
+
+  if (failedReasonHotspots.length > 0) {
+    recommendedActions.push({
+      code: `review_failed_reason_${failedReasonHotspots[0].code}`,
+      message: `Top failure reason is "${failedReasonHotspots[0].reason}" with ${failedReasonHotspots[0].count} occurrences in the last ${lookbackMinutes} minutes.`
+    });
+  }
+
+  if (recommendedActions.length === 0) {
+    recommendedActions.push({
+      code: "no_immediate_action",
+      message: `No high-signal triage actions detected in the last ${lookbackMinutes} minutes.`
+    });
+  }
+
+  return {
+    requestHotspots,
+    internalHotspots,
+    failedReasonHotspots,
+    recommendedActions
+  };
+}
+
 function parseRateLimitKey(key) {
   if (!key.startsWith("rate:")) {
     return null;
@@ -1133,7 +1234,7 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
   if (!Number.isInteger(topN) || topN <= 0 || topN > 50) {
     return res.status(400).json({ error: "invalid_top_n" });
   }
-  const allowedFields = new Set(["rateLimit", "adminActions", "internalCalls", "bets", "events", "alerts", "comparison", "requestVolumes", "summary"]);
+  const allowedFields = new Set(["rateLimit", "adminActions", "internalCalls", "bets", "events", "alerts", "comparison", "requestVolumes", "summary", "triage"]);
   let fieldsFilter = null;
   if (rawFields !== undefined) {
     const requested = String(rawFields)
@@ -1296,6 +1397,13 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
       internalCalls,
       eventsPublished
     });
+    const triage = buildStatsTriage({
+      lookbackMinutes,
+      requestVolumes,
+      failedByReason,
+      internalCalls,
+      topN
+    });
     const comparison = comparePreviousWindow
       ? (() => {
         const previousBetByStatus = Object.fromEntries(
@@ -1366,6 +1474,7 @@ app.get("/v1/admin/stats", requireApiKey("admin"), async (req, res) => {
       },
       alerts,
       summary,
+      triage,
       comparison
     };
     if (!fieldsFilter) {
